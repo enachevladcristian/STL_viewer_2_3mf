@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Box, Check, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info,
+  Box, Check, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info, Move,
   Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Scan, Settings2,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
+import { findUnsupportedOverhangs, type OverhangCheck } from './printability'
 
 type ModelInfo = {
   name: string
@@ -20,20 +21,94 @@ type ModelInfo = {
 }
 
 type Rotation = [number, number, number]
+type AxisValues = [number, number, number]
+type AxisTransformMode = 'move' | 'scale'
+type ViewPreset = 'X' | 'Y' | 'Z' | 'home'
+
+function getFlatSupportNormal(geometry: THREE.BufferGeometry, normal: THREE.Vector3, point: THREE.Vector3, minimumArea: number) {
+  const position = geometry.getAttribute('position')
+  const index = geometry.getIndex()
+  const triangleCount = Math.floor((index?.count ?? position.count) / 3)
+  const tolerance = Math.max(geometry.boundingBox?.getSize(new THREE.Vector3()).length() ?? 0, 1) * 0.00002
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), faceNormal = new THREE.Vector3()
+  let coplanarArea = 0
+
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const offset = triangle * 3
+    const ia = index ? index.getX(offset) : offset
+    const ib = index ? index.getX(offset + 1) : offset + 1
+    const ic = index ? index.getX(offset + 2) : offset + 2
+    a.fromBufferAttribute(position, ia)
+    b.fromBufferAttribute(position, ib)
+    c.fromBufferAttribute(position, ic)
+    ab.subVectors(b, a)
+    ac.subVectors(c, a)
+    faceNormal.crossVectors(ab, ac)
+    const twiceArea = faceNormal.length()
+    if (twiceArea < 1e-12) continue
+    faceNormal.multiplyScalar(1 / twiceArea)
+    if (Math.abs(faceNormal.dot(normal)) < 0.99995) continue
+    if (Math.abs(normal.dot(a.sub(point))) > tolerance
+      || Math.abs(normal.dot(b.sub(point))) > tolerance
+      || Math.abs(normal.dot(c.sub(point))) > tolerance) continue
+    coplanarArea += twiceArea * 0.5
+  }
+  if (coplanarArea < minimumArea) return null
+
+  // A bed-contact face must be a support plane: the rest of the mesh must lie
+  // entirely on one side. This also corrects inward/reversed STL facet normals.
+  let minDistance = Infinity
+  let maxDistance = -Infinity
+  for (let vertex = 0; vertex < position.count; vertex += 1) {
+    a.fromBufferAttribute(position, vertex)
+    const distance = normal.dot(a.sub(point))
+    minDistance = Math.min(minDistance, distance)
+    maxDistance = Math.max(maxDistance, distance)
+  }
+  if (minDistance < -tolerance && maxDistance > tolerance) return null
+  if (minDistance >= -tolerance && maxDistance > tolerance) return normal.clone().negate()
+  return normal.clone()
+}
+
+function constrainToBuildPlate(geometry: THREE.BufferGeometry, rotation: Rotation, scale: AxisValues, position: AxisValues): AxisValues {
+  const bounds = geometry.boundingBox?.clone()
+  if (!bounds) return position
+  const center = bounds.getCenter(new THREE.Vector3())
+  bounds.min.sub(center)
+  bounds.max.sub(center)
+  const orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+    THREE.MathUtils.degToRad(rotation[0]),
+    THREE.MathUtils.degToRad(rotation[1]),
+    THREE.MathUtils.degToRad(rotation[2]),
+  ))
+  bounds.applyMatrix4(new THREE.Matrix4().compose(new THREE.Vector3(), orientation, new THREE.Vector3(...scale)))
+  const minX = -110 - bounds.min.x
+  const maxX = 110 - bounds.max.x
+  const minZ = -110 - bounds.min.z
+  const maxZ = 110 - bounds.max.z
+  const x = minX <= maxX ? THREE.MathUtils.clamp(position[0], minX, maxX) : 0
+  const z = minZ <= maxZ ? THREE.MathUtils.clamp(position[2], minZ, maxZ) : 0
+  return [x, position[1], z]
+}
 const formatSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 const formatMeasure = (n: number) => `${n.toFixed(2)} mm`
 
-function getStats(geometry: THREE.BufferGeometry) {
+function getStats(geometry: THREE.BufferGeometry, scaleFactors: AxisValues = [1, 1, 1]) {
   const position = geometry.getAttribute('position')
+  const scale = new THREE.Vector3(...scaleFactors)
   let volume = 0
   let area = 0
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+  const edge1 = new THREE.Vector3(), edge2 = new THREE.Vector3(), normal = new THREE.Vector3()
   for (let i = 0; i < position.count; i += 3) {
-    a.fromBufferAttribute(position, i)
-    b.fromBufferAttribute(position, i + 1)
-    c.fromBufferAttribute(position, i + 2)
+    a.fromBufferAttribute(position, i).multiply(scale)
+    b.fromBufferAttribute(position, i + 1).multiply(scale)
+    c.fromBufferAttribute(position, i + 2).multiply(scale)
     volume += a.dot(b.clone().cross(c)) / 6
-    area += b.clone().sub(a).cross(c.clone().sub(a)).length() / 2
+    edge1.subVectors(b, a)
+    edge2.subVectors(c, a)
+    area += normal.crossVectors(edge1, edge2).length() / 2
   }
   return { volume: Math.abs(volume), area }
 }
@@ -119,26 +194,40 @@ function disposeObjectTree(root: THREE.Object3D) {
 }
 
 function Viewport({
-  model, wireframe, showGrid, showAxes, rotation, rotateMode, onRotationChange, onError, resetRef,
+  model, showGrid, showAxes, rotation, position, scale, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, supportOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
 }: {
   model: ModelInfo | null
-  wireframe: boolean
   showGrid: boolean
   showAxes: boolean
   rotation: Rotation
+  position: AxisValues
+  scale: AxisValues
+  analysisOverlay: THREE.BufferGeometry | null
+  supportOverlay: THREE.BufferGeometry | null
   rotateMode: boolean
+  placeOnBedMode: boolean
+  axisTransformMode: AxisTransformMode | null
   onRotationChange: (value: Rotation) => void
+  onPlaceSurface: (worldNormal: THREE.Vector3) => void
+  onFreeRotateEnd: () => void
+  onAxisTransformStart: (mode: AxisTransformMode) => void
+  onAxisTransform: (mode: AxisTransformMode, axis: number, delta: number) => void
+  onAxisTransformEnd: (mode: AxisTransformMode) => void
   onError: (message: string) => void
   resetRef: React.MutableRefObject<(() => void) | null>
+  viewPresetRef: React.MutableRefObject<((view: ViewPreset) => void) | null>
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const rotationRef = useRef<Rotation>(rotation)
+  const axisTransformModeRef = useRef<AxisTransformMode | null>(axisTransformMode)
+  axisTransformModeRef.current = axisTransformMode
   const engineRef = useRef<{
     renderer: THREE.WebGLRenderer
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     controls: OrbitControls
     mesh?: THREE.Mesh
+    axisGroup?: THREE.Group
     grid?: THREE.GridHelper
   } | null>(null)
 
@@ -207,6 +296,12 @@ function Viewport({
     const render = () => {
       frame = requestAnimationFrame(render)
       controls.update()
+      const currentEngine = engineRef.current
+      if (currentEngine?.axisGroup && currentEngine.mesh) {
+        currentEngine.axisGroup.position.copy(currentEngine.mesh.position)
+        if (axisTransformModeRef.current === 'move') currentEngine.axisGroup.quaternion.identity()
+        else currentEngine.axisGroup.quaternion.copy(currentEngine.mesh.quaternion)
+      }
       renderer.render(scene, camera)
     }
     render()
@@ -229,6 +324,11 @@ function Viewport({
       disposeObjectTree(engine.mesh)
       engine.mesh = undefined
     }
+    if (engine.axisGroup) {
+      engine.scene.remove(engine.axisGroup)
+      disposeObjectTree(engine.axisGroup)
+      engine.axisGroup = undefined
+    }
     if (!model) return
 
     const geometry = model.geometry.clone()
@@ -238,77 +338,173 @@ function Viewport({
     geometry.translate(-center.x, -center.y, -center.z)
     geometry.computeBoundingBox()
     geometry.computeVertexNormals()
-    const material = new THREE.MeshStandardMaterial({ color: '#c4d4e8', roughness: 0.34, metalness: 0.12, flatShading: true, wireframe })
+    const material = new THREE.MeshStandardMaterial({ color: '#c4d4e8', roughness: 0.34, metalness: 0.12, flatShading: true })
     const mesh = new THREE.Mesh(geometry, material)
-    mesh.add(makeAxisLabels(Math.max(...model.dimensions) * 0.58))
-    engine.scene.add(mesh)
+    const axisGroup = makeAxisLabels(Math.max(...model.dimensions) * 0.58)
+    axisGroup.name = 'model-axis-arrows'
+    engine.scene.add(mesh, axisGroup)
     engine.mesh = mesh
+    engine.axisGroup = axisGroup
 
     const modelBounds = geometry.boundingBox!.clone()
     mesh.position.y = -modelBounds.min.y
     const extent = Math.max(...model.dimensions, 220)
-    engine.camera.position.set(extent * 1.35, extent * 1.05, extent * 1.65)
     engine.camera.near = Math.max(extent / 1000, 0.001)
     engine.camera.far = extent * 100
     engine.camera.updateProjectionMatrix()
-    engine.controls.target.set(0, 0, 0)
     engine.controls.minDistance = extent * 0.08
     engine.controls.maxDistance = extent * 20
-    engine.controls.update()
-    const resetCamera = () => {
-      engine.camera.position.set(extent * 1.35, extent * 1.05, extent * 1.65)
-      engine.controls.target.set(0, 0, 0)
+    const setView = (view: ViewPreset) => {
+      const focus = engine.mesh?.getWorldPosition(new THREE.Vector3()) ?? new THREE.Vector3(0, model.dimensions[1] / 2, 0)
+      const distance = extent * 2.4
+      engine.controls.target.copy(focus)
+      if (view === 'home') {
+        engine.camera.up.set(0, 1, 0)
+        engine.camera.position.set(focus.x + extent * 1.35, focus.y + extent * 1.05, focus.z + extent * 1.65)
+      } else if (view === 'X') {
+        engine.camera.up.set(0, 1, 0)
+        engine.camera.position.set(focus.x + distance, focus.y, focus.z)
+      } else if (view === 'Y') {
+        engine.camera.up.set(0, 0, -1)
+        engine.camera.position.set(focus.x, focus.y + distance, focus.z)
+      } else {
+        engine.camera.up.set(0, 1, 0)
+        engine.camera.position.set(focus.x, focus.y, focus.z + distance)
+      }
+      engine.camera.lookAt(focus)
+      engine.camera.updateMatrixWorld(true)
       engine.controls.update()
     }
-    resetRef.current = resetCamera
-  }, [model, wireframe, resetRef])
+    resetRef.current = () => setView('home')
+    viewPresetRef.current = setView
+    setView('home')
+  }, [model, resetRef])
 
   useEffect(() => {
     rotationRef.current = rotation
     const mesh = engineRef.current?.mesh
     if (!mesh || !model) return
     mesh.rotation.set(THREE.MathUtils.degToRad(rotation[0]), THREE.MathUtils.degToRad(rotation[1]), THREE.MathUtils.degToRad(rotation[2]))
-    mesh.position.set(0, 0, 0)
-    mesh.updateMatrixWorld(true)
+    mesh.scale.set(scale[0], scale[1], scale[2])
     const bounds = mesh.geometry.boundingBox!.clone()
-    bounds.applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(mesh.rotation))
-    mesh.position.y = -bounds.min.y
+    const orientation = new THREE.Matrix4().compose(new THREE.Vector3(), mesh.quaternion, mesh.scale)
+    bounds.applyMatrix4(orientation)
+    mesh.position.set(position[0], -bounds.min.y + position[1], position[2])
     mesh.updateMatrixWorld(true)
-  }, [model, rotation, wireframe])
+  }, [model, position, rotation, scale])
 
   useEffect(() => {
-    const axes = engineRef.current?.mesh?.getObjectByName('model-axis-arrows')
+    const axes = engineRef.current?.axisGroup
     if (axes) axes.visible = showAxes
-  }, [model, showAxes, wireframe])
+  }, [model, showAxes])
+
+  useEffect(() => {
+    const mesh = engineRef.current?.mesh
+    if (!mesh) return
+    const previous = mesh.getObjectByName('printability-highlights')
+    if (previous) {
+      mesh.remove(previous)
+      disposeObjectTree(previous)
+    }
+    if (analysisOverlay && analysisOverlay.getAttribute('position')?.count) {
+      const overlay = new THREE.Mesh(
+        analysisOverlay,
+        new THREE.MeshBasicMaterial({
+          color: '#f05d5a', side: THREE.DoubleSide, transparent: true, opacity: 0.82,
+          depthTest: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+        }),
+      )
+      overlay.name = 'printability-highlights'
+      overlay.renderOrder = 2
+      mesh.add(overlay)
+    }
+  }, [analysisOverlay, model])
+
+  useEffect(() => {
+    const scene = engineRef.current?.scene
+    if (!scene) return
+    const previous = scene.getObjectByName('printability-support-columns')
+    if (previous) {
+      scene.remove(previous)
+      disposeObjectTree(previous)
+    }
+    if (supportOverlay?.getAttribute('position')?.count) {
+      const supportMesh = new THREE.Mesh(
+        supportOverlay,
+        new THREE.MeshBasicMaterial({ color: '#50ad91', side: THREE.DoubleSide, transparent: true, opacity: 0.6, depthTest: true, depthWrite: false }),
+      )
+      supportMesh.name = 'printability-support-columns'
+      supportMesh.renderOrder = 1
+      scene.add(supportMesh)
+    }
+  }, [model, supportOverlay])
 
   useEffect(() => {
     const engine = engineRef.current
     if (!engine) return
-    engine.controls.enabled = !rotateMode
+    engine.controls.enabled = !rotateMode && !placeOnBedMode
     const canvas = engine.renderer.domElement
-    if (!showAxes || !model) return () => { engine.controls.enabled = true }
+    if ((!showAxes && !placeOnBedMode) || !model) return () => { engine.controls.enabled = true }
 
     const raycaster = new THREE.Raycaster()
     raycaster.params.Line.threshold = Math.max(Math.max(...model.dimensions) * 0.035, 0.5)
     const pointer = new THREE.Vector2()
-    let drag: { pointerId: number; x: number; y: number; axis: number | null } | null = null
+    let drag: { pointerId: number; x: number; y: number; axis: number | null; action: 'rotate' | 'free' | AxisTransformMode; axisScreenX: number; axisScreenY: number; pixelsPerUnit: number } | null = null
     const onPointerDown = (event: PointerEvent) => {
       const mesh = engine.mesh
       if (!mesh) return
       const rect = canvas.getBoundingClientRect()
       pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1)
       raycaster.setFromCamera(pointer, engine.camera)
-      const axisGroup = mesh.getObjectByName('model-axis-arrows')
+      if (placeOnBedMode) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        const hit = raycaster.intersectObject(mesh, false)[0]
+        if (!hit?.face) return
+        const localPoint = mesh.worldToLocal(hit.point.clone())
+        const minimumArea = Math.max(Math.max(...model.dimensions) ** 2 * 0.0001, 0.25)
+        const supportNormal = getFlatSupportNormal(mesh.geometry, hit.face.normal, localPoint, minimumArea)
+        if (!supportNormal) {
+          onError('Choose a broad, flat outside face that can support the model on the bed.')
+          return
+        }
+        const worldNormal = supportNormal.applyMatrix3(new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld)).normalize()
+        onPlaceSurface(worldNormal)
+        return
+      }
+      const axisGroup = engine.axisGroup
       const axisHit = axisGroup
         ? raycaster.intersectObject(axisGroup, true).find(hit => Number.isInteger(hit.object.userData.rotationAxis))
         : undefined
       const axis = axisHit ? Number(axisHit.object.userData.rotationAxis) : null
       const hitModel = rotateMode && raycaster.intersectObject(mesh, false).length > 0
+      const transformMode = axisTransformModeRef.current
+      if (axis !== null && transformMode && axisGroup) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        canvas.setPointerCapture(event.pointerId)
+        const axisVector = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)][axis].applyQuaternion(axisGroup.quaternion)
+        const sampleDistance = Math.max(...model.dimensions) * 0.5
+        const origin = axisGroup.position.clone()
+        const projectedOrigin = origin.clone().project(engine.camera)
+        const projectedTip = origin.clone().addScaledVector(axisVector, sampleDistance).project(engine.camera)
+        const axisScreenX = (projectedTip.x - projectedOrigin.x) * rect.width * 0.5
+        const axisScreenY = -(projectedTip.y - projectedOrigin.y) * rect.height * 0.5
+        const screenLength = Math.hypot(axisScreenX, axisScreenY)
+        drag = {
+          pointerId: event.pointerId, x: event.clientX, y: event.clientY, axis, action: transformMode,
+          axisScreenX: screenLength > 1e-4 ? axisScreenX / screenLength : 1,
+          axisScreenY: screenLength > 1e-4 ? axisScreenY / screenLength : 0,
+          pixelsPerUnit: screenLength > 1e-4 ? screenLength / sampleDistance : 1,
+        }
+        onAxisTransformStart(transformMode)
+        return
+      }
       if (axis === null && !hitModel) return
       event.preventDefault()
       event.stopImmediatePropagation()
       canvas.setPointerCapture(event.pointerId)
-      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, axis }
+      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, axis, action: axis === null ? 'free' : 'rotate', axisScreenX: 1, axisScreenY: 0, pixelsPerUnit: 1 }
     }
     const onPointerMove = (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.pointerId) return
@@ -317,8 +513,14 @@ function Viewport({
       const dy = event.clientY - drag.y
       drag.x = event.clientX
       drag.y = event.clientY
+      if ((drag.action === 'move' || drag.action === 'scale') && drag.axis !== null) {
+        const projectedDelta = dx * drag.axisScreenX + dy * drag.axisScreenY
+        const delta = drag.action === 'move' ? projectedDelta / drag.pixelsPerUnit : projectedDelta * 0.008
+        onAxisTransform(drag.action, drag.axis, delta)
+        return
+      }
       let next: Rotation
-      if (drag.axis !== null) {
+      if (drag.action === 'rotate' && drag.axis !== null) {
         next = [...rotationRef.current] as Rotation
         const delta = Math.abs(dx) >= Math.abs(dy) ? dx : -dy
         next[drag.axis] += delta * 0.65
@@ -331,8 +533,11 @@ function Viewport({
     const onPointerUp = (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.pointerId) return
       event.stopImmediatePropagation()
+      const finishedAction = drag.action
       drag = null
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
+      if (finishedAction === 'free') onFreeRotateEnd()
+      if (finishedAction === 'move' || finishedAction === 'scale') onAxisTransformEnd(finishedAction)
     }
     canvas.addEventListener('pointerdown', onPointerDown, true)
     canvas.addEventListener('pointermove', onPointerMove)
@@ -345,23 +550,40 @@ function Viewport({
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointercancel', onPointerUp)
     }
-  }, [model, onRotationChange, rotateMode, showAxes])
+  }, [model, onAxisTransform, onAxisTransformEnd, onAxisTransformStart, onFreeRotateEnd, onPlaceSurface, onError, onRotationChange, placeOnBedMode, rotateMode, showAxes])
 
   useEffect(() => {
     const engine = engineRef.current
     if (engine?.grid) engine.grid.visible = showGrid
   }, [showGrid])
 
-  return <div className={`viewport${showAxes ? ' rotate-axes-active' : ''}${rotateMode ? ' rotate-mode' : ''}`} ref={hostRef} />
+  return <div className={`viewport${showAxes ? ' rotate-axes-active' : ''}${rotateMode ? ' rotate-mode' : ''}${placeOnBedMode ? ' place-on-bed-mode' : ''}`} ref={hostRef} />
 }
 
 function App() {
   const [model, setModel] = useState<ModelInfo | null>(null)
   const [projectName, setProjectName] = useState('Untitled project')
   const [rotation, setRotation] = useState<Rotation>([0, 0, 0])
+  const rotationStateRef = useRef<Rotation>(rotation)
+  rotationStateRef.current = rotation
+  const [position, setPosition] = useState<AxisValues>([0, 0, 0])
+  const [scale, setScale] = useState<AxisValues>([1, 1, 1])
+  const scaleStateRef = useRef<AxisValues>(scale)
+  scaleStateRef.current = scale
+  const [uniformScale, setUniformScale] = useState(true)
+  const uniformScaleRef = useRef(uniformScale)
+  uniformScaleRef.current = uniformScale
+  const [axisDragMode, setAxisDragMode] = useState<AxisTransformMode | null>(null)
+  const modelStateRef = useRef<ModelInfo | null>(model)
+  modelStateRef.current = model
+  const transformedStats = useMemo(() => model ? getStats(model.geometry, scale) : null, [model, scale])
   const [rotateMenuOpen, setRotateMenuOpen] = useState(false)
+  const [movePanelOpen, setMovePanelOpen] = useState(false)
+  const [scalePanelOpen, setScalePanelOpen] = useState(false)
   const [rotateMode, setRotateMode] = useState(false)
-  const [wireframe, setWireframe] = useState(false)
+  const [placeOnBedMode, setPlaceOnBedMode] = useState(false)
+  const [checkPanelOpen, setCheckPanelOpen] = useState(false)
+  const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
   const [showGrid, setShowGrid] = useState(true)
   const [isDragging, setIsDragging] = useState(false)
   const [error, setError] = useState('')
@@ -369,6 +591,15 @@ function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const projectNameInputRef = useRef<HTMLInputElement>(null)
   const cameraControls = useRef<(() => void) | null>(null)
+  const viewPresetControls = useRef<((view: ViewPreset) => void) | null>(null)
+
+  useEffect(() => {
+    if (!model) return
+    setPosition(current => {
+      const constrained = constrainToBuildPlate(model.geometry, rotation, scale, current)
+      return current[0] === constrained[0] && current[2] === constrained[2] ? current : constrained
+    })
+  }, [model, rotation, scale])
 
   const loadFile = useCallback((file?: File) => {
     if (!file) return
@@ -396,7 +627,16 @@ function App() {
         setModel({ name: file.name, size: file.size, triangles: Math.floor(geometry.getAttribute('position').count / 3), dimensions, volume: stats.volume, area: stats.area, geometry, source })
         setProjectName(file.name.replace(/\.stl$/i, '') || 'Untitled project')
         setRotation([0, 0, 0])
+        setPosition([0, 0, 0])
+        setScale([1, 1, 1])
+        setUniformScale(true)
+        setMovePanelOpen(false)
+        setScalePanelOpen(false)
+        setAxisDragMode(null)
         setRotateMode(false)
+        setPlaceOnBedMode(false)
+        setAnalysisResult(null)
+        setCheckPanelOpen(false)
         setNotice('Model loaded successfully')
         window.setTimeout(() => setNotice(''), 2800)
       } catch {
@@ -408,8 +648,144 @@ function App() {
 
   const chooseFile = () => inputRef.current?.click()
   const resetView = () => cameraControls.current?.()
-  const onRotationChange = useCallback((next: Rotation) => setRotation(next), [])
-  const adjustRotation = (axis: number, amount: number) => setRotation(current => current.map((value, index) => index === axis ? value + amount : value) as Rotation)
+  const toggleRotatePanel = () => {
+    setPlaceOnBedMode(false)
+    setMovePanelOpen(false)
+    setScalePanelOpen(false)
+    if (rotateMenuOpen) {
+      setRotateMenuOpen(false)
+      setRotateMode(false)
+    } else {
+      setCheckPanelOpen(false)
+      setRotateMenuOpen(true)
+    }
+  }
+  const closeRotatePanel = () => {
+    setRotateMenuOpen(false)
+    setRotateMode(false)
+    setPlaceOnBedMode(false)
+    setMovePanelOpen(false)
+    setScalePanelOpen(false)
+  }
+  const toggleCheckPanel = () => {
+    setPlaceOnBedMode(false)
+    setMovePanelOpen(false)
+    setScalePanelOpen(false)
+    setRotateMenuOpen(false)
+    setRotateMode(false)
+    if (checkPanelOpen) {
+      setCheckPanelOpen(false)
+    } else {
+      setRotateMenuOpen(false)
+      setRotateMode(false)
+      setCheckPanelOpen(true)
+    }
+  }
+  const toggleMovePanel = () => {
+    const open = !movePanelOpen
+    setMovePanelOpen(open)
+    setScalePanelOpen(false)
+    setRotateMenuOpen(false)
+    setRotateMode(false)
+    setPlaceOnBedMode(false)
+    setCheckPanelOpen(false)
+  }
+  const toggleScalePanel = () => {
+    const open = !scalePanelOpen
+    setScalePanelOpen(open)
+    setMovePanelOpen(false)
+    setRotateMenuOpen(false)
+    setRotateMode(false)
+    setPlaceOnBedMode(false)
+    setCheckPanelOpen(false)
+  }
+  const runPrintabilityCheck = () => {
+    if (!model) return
+    setAnalysisResult(findUnsupportedOverhangs(model.geometry, rotation, 45, scale, position, 0.2))
+  }
+  const onRotationChange = useCallback((next: Rotation) => {
+    setRotation(next)
+    setAnalysisResult(null)
+  }, [])
+  const onFreeRotateEnd = useCallback(() => {
+    setRotateMode(false)
+    setRotateMenuOpen(true)
+  }, [])
+  const onAxisTransformStart = useCallback((mode: AxisTransformMode) => {
+    setAxisDragMode(mode)
+    if (mode === 'move') setMovePanelOpen(false)
+    else setScalePanelOpen(false)
+  }, [])
+  const onAxisTransformEnd = useCallback((mode: AxisTransformMode) => {
+    setAxisDragMode(null)
+    if (mode === 'move') setMovePanelOpen(true)
+    else setScalePanelOpen(true)
+  }, [])
+  const onAxisTransform = useCallback((mode: AxisTransformMode, axis: number, delta: number) => {
+    if (mode === 'move') {
+      setPosition(current => {
+        const next = [...current] as AxisValues
+        next[axis] += delta
+        const currentModel = modelStateRef.current
+        return currentModel ? constrainToBuildPlate(currentModel.geometry, rotationStateRef.current, scaleStateRef.current, next) : next
+      })
+      setAnalysisResult(null)
+      return
+    }
+    const multiplier = Math.exp(delta)
+    setScale(current => {
+      if (uniformScaleRef.current) {
+        const uniform = Math.max(0.01, Math.min(5, current[axis] * multiplier))
+        return [uniform, uniform, uniform]
+      }
+      const next = [...current] as AxisValues
+      next[axis] = Math.max(0.01, Math.min(5, next[axis] * multiplier))
+      return next
+    })
+    setAnalysisResult(null)
+  }, [])
+  const onPlaceSurface = useCallback((surfaceNormal: THREE.Vector3) => {
+    const currentRotation = rotationStateRef.current
+    const currentQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(currentRotation[0]),
+      THREE.MathUtils.degToRad(currentRotation[1]),
+      THREE.MathUtils.degToRad(currentRotation[2]),
+    ))
+    const alignToBed = new THREE.Quaternion().setFromUnitVectors(surfaceNormal, new THREE.Vector3(0, -1, 0))
+    currentQuaternion.premultiply(alignToBed)
+    const alignedRotation = new THREE.Euler().setFromQuaternion(currentQuaternion, 'XYZ')
+    setRotation([
+      THREE.MathUtils.radToDeg(alignedRotation.x),
+      THREE.MathUtils.radToDeg(alignedRotation.y),
+      THREE.MathUtils.radToDeg(alignedRotation.z),
+    ])
+    setPlaceOnBedMode(false)
+    setRotateMenuOpen(true)
+    setAnalysisResult(null)
+    setError('')
+    setNotice('Model placed on the selected flat surface')
+    window.setTimeout(() => setNotice(''), 2800)
+  }, [])
+  const adjustRotation = (axis: number, amount: number) => {
+    setRotation(current => current.map((value, index) => index === axis ? value + amount : value) as Rotation)
+    setAnalysisResult(null)
+  }
+  const resetModelPosition = () => {
+    setRotation([0, 0, 0])
+    setPosition([0, 0, 0])
+    setPlaceOnBedMode(false)
+    setAnalysisResult(null)
+  }
+  const resetModelScale = () => {
+    setScale([1, 1, 1])
+    setAnalysisResult(null)
+  }
+  const togglePlaceOnBedMode = () => {
+    if (!placeOnBedMode) setRotateMenuOpen(false)
+    setPlaceOnBedMode(value => !value)
+    setRotateMode(false)
+    setError('')
+  }
   const downloadModel = () => {
     if (!model) return
     const safeName = projectName.trim()
@@ -471,31 +847,70 @@ function App() {
             <button className={`canvas-tool ${showGrid ? 'selected' : ''}`} title="Toggle grid" onClick={() => setShowGrid(value => !value)}><Grid2X2 size={16}/></button>
             <span className="tool-separator"/>
             <button className="canvas-tool" title="Fit model to view" onClick={resetView}><Maximize size={16}/></button>
-            <button className="canvas-tool" title="Reset camera" onClick={resetView}><RotateCcw size={15}/></button>
             <span className="tool-separator"/>
-            <button className={`canvas-tool ${wireframe ? 'selected' : ''}`} title="Toggle wireframe" onClick={() => setWireframe(value => !value)}><Scan size={17}/></button>
-            <button className={`canvas-tool rotate-tool ${rotateMenuOpen || rotateMode ? 'selected' : ''}`} title="Rotate model" aria-label="Open rotate tools" aria-expanded={rotateMenuOpen} disabled={!model} onClick={() => setRotateMenuOpen(value => !value)}><Rotate3D size={17}/></button>
             <button className="canvas-tool fullscreen-tool" title="Fullscreen" onClick={() => document.querySelector('.canvas-panel')?.requestFullscreen?.()}><Expand size={16}/></button>
           </div>
-          {rotateMenuOpen && model && <div className="rotate-menu" role="dialog" aria-label="Rotate model">
-            <div className="rotate-menu-header"><div><Rotate3D size={16}/><strong>Rotate model</strong></div><button title="Close rotate menu" aria-label="Close rotate menu" onClick={() => setRotateMenuOpen(false)}><X size={15}/></button></div>
-            <button className="free-rotate-toggle" aria-pressed={rotateMode} onClick={() => setRotateMode(value => !value)}><span><strong>Free rotate</strong><small>{rotateMode ? 'Drag the model in the viewport' : 'Drag directly on the model'}</small></span><span className={`toggle ${rotateMode ? 'on' : ''}`}><i/></span></button>
+
+        </div>
+
+        <div className={`canvas-body${(rotateMenuOpen || movePanelOpen || scalePanelOpen || checkPanelOpen) && model ? ' with-rotate-panel' : ''}`}>
+          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} rotation={rotation} position={position} scale={scale} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} supportOverlay={analysisResult?.supports ?? null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
+          {model && <div className="left-tool-rail">
+            <button className={`left-tool-button ${rotateMenuOpen || rotateMode || placeOnBedMode ? 'selected' : ''}`} title="Open rotate tools" aria-label="Open rotate tools" aria-expanded={rotateMenuOpen} onClick={toggleRotatePanel}><Rotate3D size={18}/><span>Rotate</span></button>
+            <button className={`left-tool-button ${movePanelOpen || axisDragMode === 'move' ? 'selected' : ''}`} title="Move model" aria-label="Move model" aria-expanded={movePanelOpen} onClick={toggleMovePanel}><Move size={18}/><span>Move</span></button>
+            <button className={`left-tool-button ${scalePanelOpen || axisDragMode === 'scale' ? 'selected' : ''}`} title="Scale model" aria-label="Scale model" aria-expanded={scalePanelOpen} onClick={toggleScalePanel}><Maximize size={18}/><span>Scale</span></button>
+            <button className={`left-tool-button ${checkPanelOpen || analysisResult ? 'selected' : ''}`} title="Check printability" aria-label="Check printability" aria-pressed={checkPanelOpen || Boolean(analysisResult)} onClick={toggleCheckPanel}><Scan size={18}/><span>Check</span></button>
+          </div>}
+          {rotateMenuOpen && model && <div className="rotate-panel" role="dialog" aria-label="Rotate model">
+            <div className="rotate-menu-header"><div><Rotate3D size={16}/><strong>Rotate model</strong></div><button title="Close rotate menu" aria-label="Close rotate menu" onClick={closeRotatePanel}><X size={15}/></button></div>
+            <button className="free-rotate-toggle" aria-pressed={rotateMode} onClick={() => { setPlaceOnBedMode(false); setRotateMode(true); setRotateMenuOpen(false) }}><span><strong>Free rotate</strong><small>{rotateMode ? 'Drag the model in the viewport' : 'Drag directly on the model'}</small></span><span className={`toggle ${rotateMode ? 'on' : ''}`}><i/></span></button>
             <div className="rotate-menu-divider"/>
             <div className="rotate-menu-label">ROTATE BY 45°</div>
             {(['X', 'Y', 'Z'] as const).map((axis, index) => <div className="rotate-axis-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><span className="rotate-angle">{Math.round(rotation[index])}°</span><button aria-label={`Rotate ${axis} negative 45 degrees`} onClick={() => adjustRotation(index, -45)}>−45°</button><button aria-label={`Rotate ${axis} positive 45 degrees`} onClick={() => adjustRotation(index, 45)}>+45°</button></div>)}
-            <button className="reset-rotation" title="Return the model to its initial orientation and centered bed position" onClick={() => setRotation([0, 0, 0])}>Reset position</button>
+            <button className="reset-rotation" title="Return the model to its initial orientation and centered bed position" onClick={resetModelPosition}><RotateCcw size={14}/> Reset position</button>
+            <button className={`run-analysis-button place-surface-button${placeOnBedMode ? ' active' : ''}`} aria-pressed={placeOnBedMode} onClick={togglePlaceOnBedMode}><Triangle size={14}/>{placeOnBedMode ? 'Click a flat face on the model' : 'Place on bed from a flat face'}</button>
           </div>}
-        </div>
-
-        <div className="canvas-body">
-          <Viewport model={model} wireframe={wireframe} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode} rotation={rotation} rotateMode={rotateMode} onRotationChange={onRotationChange} onError={setError} resetRef={cameraControls}/>
+          {movePanelOpen && model && <div className="rotate-panel transform-panel" role="dialog" aria-label="Move model">
+            <div className="rotate-menu-header"><div><Move size={16}/><strong>Move model</strong></div><button title="Close move panel" aria-label="Close move panel" onClick={() => setMovePanelOpen(false)}><X size={15}/></button></div>
+            <p className="analysis-intro">Move the model along the world axes. Values are in millimeters.</p>
+            <div className="rotate-menu-label">POSITION · MM</div>
+            {(['X', 'Y', 'Z'] as const).map((axis, index) => <label className="axis-transform-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><input type="number" step="1" value={position[index]} aria-label={`Move on ${axis} axis in millimeters`} onChange={event => { const value = Number(event.target.value); setPosition(current => current.map((item, i) => i === index ? value : item) as AxisValues); setAnalysisResult(null) }}/><span className="axis-transform-unit">mm</span></label>)}
+            <button className="reset-rotation" onClick={() => { setPosition([0, 0, 0]); setAnalysisResult(null) }}><RotateCcw size={14}/> Reset movement</button>
+          </div>}
+          {scalePanelOpen && model && <div className="rotate-panel transform-panel" role="dialog" aria-label="Scale model">
+            <div className="rotate-menu-header"><div><Maximize size={16}/><strong>Scale model</strong></div><button title="Close scale panel" aria-label="Close scale panel" onClick={() => setScalePanelOpen(false)}><X size={15}/></button></div>
+            <p className="analysis-intro">Drag a colored axis to scale, or enter percentages below.</p>
+            <label className="uniform-scale-toggle"><input type="checkbox" checked={uniformScale} onChange={event => { const checked = event.target.checked; setUniformScale(checked); if (checked) setScale(current => [current[0], current[0], current[0]]) }}/><span>Uniform scaling</span></label>
+            <div className="rotate-menu-label">SCALE · PERCENT</div>
+            {(['X', 'Y', 'Z'] as const).map((axis, index) => <label className="axis-transform-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><input type="number" min="1" max="500" step="1" value={Math.round(scale[index] * 100)} aria-label={`Scale ${axis} axis in percent`} onChange={event => { const percent = Math.max(1, Math.min(500, Number(event.target.value) || 1)); setScale(current => uniformScale ? [percent / 100, percent / 100, percent / 100] : current.map((item, i) => i === index ? percent / 100 : item) as AxisValues); setAnalysisResult(null) }}/><span className="axis-transform-unit">%</span></label>)}
+            <button className="reset-rotation" onClick={resetModelScale}><RotateCcw size={14}/> Reset scale</button>
+          </div>}
+          {checkPanelOpen && model && <div className="analysis-panel" role="dialog" aria-label="Printability check">
+            <div className="rotate-menu-header"><div><Scan size={16}/><strong>Printability check</strong></div><button title="Close printability panel" aria-label="Close printability panel" onClick={() => setCheckPanelOpen(false)}><X size={15}/></button></div>
+            <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
+            {!analysisResult ? <>
+              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Steep downward faces over 45° are conservatively flagged for support; shallower surfaces use the 45° lateral reach.</p>
+              <button className="run-analysis-button" onClick={runPrintabilityCheck}><Scan size={15}/> Run check</button>
+            </> : <>
+              <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
+                <strong>{analysisResult.flaggedTriangles ? 'Potential supports needed' : 'No unsupported surfaces found'}</strong>
+                <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} triangles are flagged for support</span>
+              </div>
+              {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported <i className="support-legend-swatch"/> Green: mock supports</div>}
+              <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
+              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck}><Scan size={14}/> Run again</button>
+            </>}
+            <div className="analysis-divider"/>
+            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>
+            {analysisResult && <button className="clear-analysis-button" onClick={() => setAnalysisResult(null)}>Clear highlights</button>}
+          </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop your STL to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
             <div className="welcome-art"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="art-cube"><div className="cube-top"/><div className="cube-left"/><div className="cube-right"/></div><span className="art-spark spark-a">✳</span><span className="art-spark spark-b">✦</span></div>
             <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL file to explore every angle, inspect dimensions, and get to know your design.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose an STL file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
           </div>}
-          {model && <div className="canvas-hint"><MousePointer2 size={13}/><span>{rotateMode ? 'Drag the model to rotate' : rotateMenuOpen ? 'Drag a colored axis to rotate' : 'Drag to orbit'}</span><i/><span>{rotateMode ? 'Turn off Free rotate in menu' : rotateMenuOpen ? 'Or use 45° controls' : 'Scroll to zoom'}</span></div>}
-          <div className="view-cube" aria-label="3D axis orientation"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span><div className="cube-center"><Box size={14}/></div></div>
+          {model && <div className="canvas-hint"><MousePointer2 size={13}/><span>{placeOnBedMode ? 'Click a broad, flat face' : axisDragMode === 'move' ? 'Drag a colored axis to move' : axisDragMode === 'scale' ? 'Drag a colored axis to scale' : rotateMode ? 'Drag the model to rotate' : rotateMenuOpen ? 'Drag a colored axis to rotate' : movePanelOpen || scalePanelOpen ? 'Drag a colored axis or edit values' : 'Drag to orbit'}</span><i/><span>{placeOnBedMode ? 'Selected face will rest on the bed' : axisDragMode ? 'Menu returns when you release' : rotateMode ? 'Turn off Free rotate in menu' : rotateMenuOpen ? 'Or use 45° controls' : movePanelOpen || scalePanelOpen ? 'Select an axis handle' : 'Scroll to zoom'}</span></div>}
+          <div className="view-cube" role="group" aria-label="Choose a 3D view"><button className="axis-y" title="View from +Y" aria-label="Top view from positive Y" disabled={!model} onClick={() => viewPresetControls.current?.('Y')}>Y</button><button className="axis-x" title="View from +X" aria-label="Side view from positive X" disabled={!model} onClick={() => viewPresetControls.current?.('X')}>X</button><button className="axis-z" title="View from +Z" aria-label="Front view from positive Z" disabled={!model} onClick={() => viewPresetControls.current?.('Z')}>Z</button><button className="cube-center" title="Reset to isometric view" aria-label="Reset to isometric view" disabled={!model} onClick={resetView}><Box size={14}/></button></div>
           {model && <div className="scale-indicator"><span className="scale-line"/><span>{Math.max(...model.dimensions).toFixed(0)} mm</span></div>}
           {error && <div className="toast error-toast"><Info size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={15}/></button></div>}
           {notice && <div className="toast success-toast"><Check size={16}/><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss"><X size={15}/></button></div>}
@@ -508,11 +923,11 @@ function App() {
         <div className="inspector-content">
           <div className="section-label">MODEL</div>
           {model ? <>
-            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> STL mesh</span></div><button className="more-button" title="Remove model" onClick={() => { setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setRotateMode(false); setError('') }}><X size={15}/></button></div>
+            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> STL mesh</span></div><button className="more-button" title="Remove model" onClick={() => { setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
             <div className="section-label section-gap">DIMENSIONS <span>mm</span></div>
-            <div className="dimension-grid"><div className="dim-item"><span className="dim-axis axis-red">X</span><strong>{formatMeasure(model.dimensions[0])}</strong></div><div className="dim-item"><span className="dim-axis axis-green">Y</span><strong>{formatMeasure(model.dimensions[1])}</strong></div><div className="dim-item"><span className="dim-axis axis-blue">Z</span><strong>{formatMeasure(model.dimensions[2])}</strong></div></div>
+            <div className="dimension-grid"><div className="dim-item"><span className="dim-axis axis-red">X</span><strong>{formatMeasure(model.dimensions[0] * scale[0])}</strong></div><div className="dim-item"><span className="dim-axis axis-green">Y</span><strong>{formatMeasure(model.dimensions[1] * scale[1])}</strong></div><div className="dim-item"><span className="dim-axis axis-blue">Z</span><strong>{formatMeasure(model.dimensions[2] * scale[2])}</strong></div></div>
             <div className="section-label section-gap">MESH STATISTICS</div>
-            <div className="stat-list"><div><span><Triangle size={14}/> Triangles</span><strong>{model.triangles.toLocaleString()}</strong></div><div><span><Scan size={14}/> Surface area</span><strong>{model.area.toFixed(2)} mm²</strong></div><div><span><Box size={14}/> Volume</span><strong>{model.volume.toFixed(2)} mm³</strong></div></div>
+            <div className="stat-list"><div><span><Triangle size={14}/> Triangles</span><strong>{model.triangles.toLocaleString()}</strong></div><div><span><Scan size={14}/> Surface area</span><strong>{(transformedStats?.area ?? model.area).toFixed(2)} mm²</strong></div><div><span><Box size={14}/> Volume</span><strong>{(transformedStats?.volume ?? model.volume).toFixed(2)} mm³</strong></div></div>
             <div className="health-card"><div className="health-icon"><Check size={14}/></div><div><strong>Mesh loaded</strong><span>Ready to inspect in 3D</span></div><span className="health-dot"/></div>
           </> : <>
             <div className="empty-model"><div className="empty-icon"><Box size={20}/></div><strong>No model open</strong><p>Upload an STL file to see its dimensions and mesh details.</p><button onClick={chooseFile}><Upload size={14}/> Open file</button></div>
