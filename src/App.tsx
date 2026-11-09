@@ -11,6 +11,8 @@ import type { OverhangCheck } from './printability'
 type ModelInfo = {
   name: string
   size: number
+  format: 'STL' | '3MF'
+  parameters: { key: string; value: string; source: string }[]
   triangles: number
   dimensions: [number, number, number]
   volume: number
@@ -40,6 +42,11 @@ type STLWorkerResponse = {
   volume?: number
   area?: number
   error?: string
+}
+
+type ThreeMFWorkerResponse = STLWorkerResponse & {
+  parameters?: { key: string; value: string; source: string }[]
+  unit?: string
 }
 
 type Rotation = [number, number, number]
@@ -133,6 +140,35 @@ function getStats(geometry: THREE.BufferGeometry, scaleFactors: AxisValues = [1,
     area += normal.crossVectors(edge1, edge2).length() / 2
   }
   return { volume: Math.abs(volume), area }
+}
+
+function makeBinarySTL(geometry: THREE.BufferGeometry) {
+  const position = geometry.getAttribute('position')
+  const index = geometry.getIndex()
+  const triangleCount = Math.floor((index?.count ?? position.count) / 3)
+  const buffer = new ArrayBuffer(84 + triangleCount * 50)
+  const bytes = new Uint8Array(buffer)
+  new TextEncoder().encode('STL Viewer export from 3MF model').forEach((byte, i) => { bytes[i] = byte })
+  const view = new DataView(buffer)
+  view.setUint32(80, triangleCount, true)
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+  const normal = new THREE.Vector3(), edge1 = new THREE.Vector3(), edge2 = new THREE.Vector3()
+  let offset = 84
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const base = triangle * 3
+    const ia = index ? index.getX(base) : base
+    const ib = index ? index.getX(base + 1) : base + 1
+    const ic = index ? index.getX(base + 2) : base + 2
+    a.fromBufferAttribute(position, ia); b.fromBufferAttribute(position, ib); c.fromBufferAttribute(position, ic)
+    normal.crossVectors(edge1.subVectors(b, a), edge2.subVectors(c, a)).normalize()
+    for (const value of [normal.x, normal.y, normal.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]) {
+      view.setFloat32(offset, value, true)
+      offset += 4
+    }
+    view.setUint16(offset, 0, true)
+    offset += 2
+  }
+  return new Blob([buffer], { type: 'model/stl' })
 }
 
 function makeAxisLabels(length: number) {
@@ -644,8 +680,66 @@ function App() {
     setIsProcessing(false)
     setError('')
     setNotice('')
-    if (!file.name.toLowerCase().endsWith('.stl')) {
-      setError('That file type is not supported yet. Choose an .stl file.')
+    const extension = file.name.toLowerCase().split('.').pop()
+    if (extension !== 'stl' && extension !== '3mf') {
+      setError('That file type is not supported yet. Choose an .stl or .3mf file.')
+      return
+    }
+    if (!file.size) {
+      setError('This file appears to be empty. Please choose another model file.')
+      return
+    }
+    if (extension === '3mf') {
+      let worker: Worker
+      try {
+        worker = new Worker(new URL('./3mf-worker.ts', import.meta.url), { type: 'module' })
+      } catch {
+        setError('This browser could not start the 3MF processing worker.')
+        return
+      }
+      loadWorkerRef.current = worker
+      setIsProcessing(true)
+      worker.onmessage = event => {
+        if (loadWorkerRef.current !== worker) return
+        loadWorkerRef.current = null
+        worker.terminate()
+        setIsProcessing(false)
+        const result = event.data as ThreeMFWorkerResponse
+        if (result.error || !result.positions || !result.normals || !result.dimensions || !result.bounds) {
+          setError(result.error || 'This 3MF could not be parsed. Check that it is a valid 3MF archive.')
+          return
+        }
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(result.positions), 3))
+        geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(result.normals), 3))
+        const [minX, minY, minZ, maxX, maxY, maxZ] = result.bounds
+        geometry.boundingBox = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ))
+        geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Math.hypot(...result.dimensions.map(value => value * 0.5)))
+        setModel({
+          name: file.name, size: file.size, format: '3MF', parameters: result.parameters ?? [],
+          triangles: result.triangles ?? Math.floor(geometry.getAttribute('position').count / 3),
+          dimensions: result.dimensions, volume: result.volume ?? 0, area: result.area ?? 0, geometry, source: file,
+        })
+        setProjectName(file.name.replace(/\.3mf$/i, '') || 'Untitled project')
+        setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setUniformScale(true)
+        setMovePanelOpen(false); setScalePanelOpen(false); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false)
+        setAnalysisResult(null); setCheckPanelOpen(false)
+        const count = result.parameters?.length ?? 0
+        setNotice(count ? `3MF model loaded · ${count} print parameters found` : '3MF model loaded · no slicer settings found')
+        window.setTimeout(() => setNotice(''), 3500)
+      }
+      worker.onerror = () => {
+        if (loadWorkerRef.current !== worker) return
+        loadWorkerRef.current = null; worker.terminate(); setIsProcessing(false)
+        setError('The 3MF processing worker stopped unexpectedly. Try exporting the 3MF again or use a smaller file.')
+      }
+      file.arrayBuffer().then(buffer => {
+        if (loadWorkerRef.current === worker) worker.postMessage({ buffer }, [buffer])
+      }).catch(() => {
+        if (loadWorkerRef.current !== worker) return
+        loadWorkerRef.current = null; worker.terminate(); setIsProcessing(false)
+        setError('We could not read this 3MF file. Please try another file.')
+      })
       return
     }
     if (!file.size) {
@@ -681,6 +775,8 @@ function App() {
       setModel({
         name: file.name,
         size: file.size,
+        format: 'STL',
+        parameters: [],
         triangles: result.triangles ?? Math.floor(geometry.getAttribute('position').count / 3),
         dimensions: result.dimensions,
         volume: result.volume ?? 0,
@@ -941,7 +1037,8 @@ function App() {
       .replace(/\s+/g, ' ')
       .trim() || 'model'
     const fileName = `${safeName}.stl`
-    const url = URL.createObjectURL(model.source)
+    const stlFile = model.format === 'STL' ? model.source : makeBinarySTL(model.geometry)
+    const url = URL.createObjectURL(stlFile)
     const link = document.createElement('a')
     link.href = url
     link.download = fileName
@@ -973,8 +1070,8 @@ function App() {
 
   return <div className="app-shell" onDragOver={event => { event.preventDefault(); setIsDragging(true) }} onDragLeave={event => { if (event.target === event.currentTarget) setIsDragging(false) }} onDrop={onDrop}>
     <header className="topbar">
-      <div className="topbar-actions"><button className="upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={16}/><span>{isProcessing ? 'Processing STL…' : 'Open STL'}</span></button></div>
-      <input ref={inputRef} type="file" accept=".stl,model/stl" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
+      <div className="topbar-actions"><button className="upload-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={16}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button></div>
+      <input ref={inputRef} type="file" accept=".stl,.3mf,model/stl,application/vnd.ms-package.3dmanufacturing-3dmodel+xml" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
     </header>
 
     <main className="workspace">
@@ -984,7 +1081,7 @@ function App() {
             <span className="crumb-icon"><FileBox size={16}/></span>
             <input ref={projectNameInputRef} className="project-name-input" aria-label="Project name" title="Edit project name" value={projectName} onChange={event => setProjectName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}/>
             <button className="rename-project-button" type="button" title="Rename project" aria-label="Rename project" onClick={() => projectNameInputRef.current?.focus()}><Pencil size={13}/></button>
-            {model && <span className="file-ext">.stl</span>}
+            {model && <span className="file-ext">.{model.format.toLowerCase()}</span>}
             {model && <span className="crumb-divider"/>}
             {model && <span className="local-badge"><ShieldCheck size={12}/> Local file</span>}
           </div>
@@ -1051,10 +1148,10 @@ function App() {
             <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>
             {analysisResult && <button className="clear-analysis-button" onClick={() => { cancelCheck(); setAnalysisResult(null) }}>Clear highlights</button>}
           </div>}
-          {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop your STL to open</strong><span>Release to start viewing</span></div></div>}
+          {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
             <div className="welcome-art"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="art-cube"><div className="cube-top"/><div className="cube-left"/><div className="cube-right"/></div><span className="art-spark spark-a">✳</span><span className="art-spark spark-b">✦</span></div>
-            <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL file to explore every angle, inspect dimensions, and get to know your design.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose an STL file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
+            <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL or 3MF to explore the mesh, inspect dimensions, and read print settings embedded in a 3MF.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose a model file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
           </div>}
           {model && <div className="canvas-hint"><MousePointer2 size={13}/><span>{placeOnBedMode ? 'Click a broad, flat face' : axisDragMode === 'move' ? 'Drag a colored axis to move' : axisDragMode === 'scale' ? 'Drag a colored axis to scale' : rotateMode ? 'Drag the model to rotate' : rotateMenuOpen ? 'Drag a colored axis to rotate' : movePanelOpen || scalePanelOpen ? 'Drag a colored axis or edit values' : 'Drag to orbit'}</span><i/><span>{placeOnBedMode ? 'Selected face will rest on the bed' : axisDragMode ? 'Menu returns when you release' : rotateMode ? 'Turn off Free rotate in menu' : rotateMenuOpen ? 'Or use 45° controls' : movePanelOpen || scalePanelOpen ? 'Select an axis handle' : 'Scroll to zoom'}</span></div>}
           <div className="view-cube" role="group" aria-label="Choose a 3D view"><button className="axis-y" title="View from +Y" aria-label="Top view from positive Y" disabled={!model} onClick={() => viewPresetControls.current?.('Y')}>Y</button><button className="axis-x" title="View from +X" aria-label="Side view from positive X" disabled={!model} onClick={() => viewPresetControls.current?.('X')}>X</button><button className="axis-z" title="View from +Z" aria-label="Front view from positive Z" disabled={!model} onClick={() => viewPresetControls.current?.('Z')}>Z</button><button className="cube-center" title="Reset to isometric view" aria-label="Reset to isometric view" disabled={!model} onClick={resetView}><Box size={14}/></button></div>
@@ -1070,15 +1167,19 @@ function App() {
         <div className="inspector-content">
           <div className="section-label">MODEL</div>
           {model ? <>
-            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> STL mesh</span></div><button className="more-button" title="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
+            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> {model.format} mesh</span></div><button className="more-button" title="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
             <div className="section-label section-gap">DIMENSIONS <span>mm</span></div>
             <div className="dimension-grid"><div className="dim-item"><span className="dim-axis axis-red">X</span><strong>{formatMeasure(model.dimensions[0] * scale[0])}</strong></div><div className="dim-item"><span className="dim-axis axis-green">Y</span><strong>{formatMeasure(model.dimensions[1] * scale[1])}</strong></div><div className="dim-item"><span className="dim-axis axis-blue">Z</span><strong>{formatMeasure(model.dimensions[2] * scale[2])}</strong></div></div>
             <div className="section-label section-gap">MESH STATISTICS</div>
             <div className="stat-list"><div><span><Triangle size={14}/> Triangles</span><strong>{model.triangles.toLocaleString()}</strong></div><div><span><Scan size={14}/> Surface area</span><strong>{(transformedStats?.area ?? model.area).toFixed(2)} mm²</strong></div><div><span><Box size={14}/> Volume</span><strong>{(transformedStats?.volume ?? model.volume).toFixed(2)} mm³</strong></div></div>
+            {model.format === '3MF' && <>
+              <div className="section-label section-gap">3MF PRINT PARAMETERS <span>{model.parameters.length}</span></div>
+              {model.parameters.length ? <div className="parameter-list">{model.parameters.map((parameter, index) => <div className="parameter-row" key={`${parameter.key}-${index}`} title={`Found in ${parameter.source}`}><span>{parameter.key}</span><strong>{parameter.value}</strong></div>)}</div> : <div className="parameter-empty">This 3MF contains model data, but no readable slicer settings were found. Settings can vary by slicer.</div>}
+            </>}
             <div className="health-card"><div className="health-icon"><Check size={14}/></div><div><strong>Mesh loaded</strong><span>Ready to inspect in 3D</span></div><span className="health-dot"/></div>
           </> : <>
-            <div className="empty-model"><div className="empty-icon"><Box size={20}/></div><strong>No model open</strong><p>Upload an STL file to see its dimensions and mesh details.</p><button onClick={chooseFile}><Upload size={14}/> Open file</button></div>
-            <div className="section-label section-gap">SUPPORTED FORMAT</div><div className="format-row"><span className="format-chip">STL</span><div><strong>STereoLithography</strong><span>Binary and ASCII formats</span></div><Check size={15}/></div>
+            <div className="empty-model"><div className="empty-icon"><Box size={20}/></div><strong>No model open</strong><p>Upload an STL or 3MF file to inspect its mesh and available print settings.</p><button onClick={chooseFile}><Upload size={14}/> Open file</button></div>
+            <div className="section-label section-gap">SUPPORTED FORMATS</div><div className="format-row"><span className="format-chip">STL</span><div><strong>STereoLithography</strong><span>Binary and ASCII meshes</span></div><Check size={15}/></div><div className="format-row"><span className="format-chip">3MF</span><div><strong>3D Manufacturing Format</strong><span>Mesh and embedded print settings</span></div><Check size={15}/></div>
             <div className="privacy-note"><ShieldCheck size={16}/><span>Your files never leave your device. Processing happens locally in your browser.</span></div>
           </>}
         </div>

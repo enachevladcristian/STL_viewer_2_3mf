@@ -4,7 +4,9 @@ A browser-based STL viewer for quickly opening and inspecting 3D models. Files a
 
 ## Features
 
-- Open binary and ASCII `.stl` files, or drag and drop a file into the viewport
+- Open binary and ASCII `.stl` files and `.3mf` projects, or drag and drop a file into the viewport
+- Read common embedded slicer settings from 3MF metadata/configuration files alongside the imported mesh
+- 3MF parsing and settings extraction run locally in a background worker; exporting an imported 3MF produces an STL mesh
 - Parse, center, and calculate mesh statistics in background workers to keep the UI responsive on dense STL files
 - Run the layer-support check in a background worker; large geometry is not duplicated for viewport rendering
 - Rename the project and download the original STL data using that name as the `.stl` filename
