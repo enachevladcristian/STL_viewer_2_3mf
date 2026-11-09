@@ -6,8 +6,7 @@ import {
 } from 'lucide-react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
-import { findUnsupportedOverhangs, type OverhangCheck } from './printability'
+import type { OverhangCheck } from './printability'
 
 type ModelInfo = {
   name: string
@@ -17,7 +16,30 @@ type ModelInfo = {
   volume: number
   area: number
   geometry: THREE.BufferGeometry
-  source: ArrayBuffer
+  source: File
+}
+
+type CheckWorkerResponse = {
+  triangleCount?: number
+  flaggedTriangles?: number
+  flaggedArea?: number
+  limitDegrees?: number
+  highlightPositions?: ArrayBuffer
+  highlightNormals?: ArrayBuffer
+  supportPositions?: ArrayBuffer
+  supportNormals?: ArrayBuffer
+  error?: string
+}
+
+type STLWorkerResponse = {
+  positions?: ArrayBuffer
+  normals?: ArrayBuffer
+  triangles?: number
+  dimensions?: [number, number, number]
+  bounds?: [number, number, number, number, number, number]
+  volume?: number
+  area?: number
+  error?: string
 }
 
 type Rotation = [number, number, number]
@@ -331,13 +353,7 @@ function Viewport({
     }
     if (!model) return
 
-    const geometry = model.geometry.clone()
-    geometry.computeBoundingBox()
-    const bounds = geometry.boundingBox!
-    const center = bounds.getCenter(new THREE.Vector3())
-    geometry.translate(-center.x, -center.y, -center.z)
-    geometry.computeBoundingBox()
-    geometry.computeVertexNormals()
+    const geometry = model.geometry
     const material = new THREE.MeshStandardMaterial({ color: '#c4d4e8', roughness: 0.34, metalness: 0.12, flatShading: true })
     const mesh = new THREE.Mesh(geometry, material)
     const axisGroup = makeAxisLabels(Math.max(...model.dimensions) * 0.58)
@@ -576,7 +592,12 @@ function App() {
   const [axisDragMode, setAxisDragMode] = useState<AxisTransformMode | null>(null)
   const modelStateRef = useRef<ModelInfo | null>(model)
   modelStateRef.current = model
-  const transformedStats = useMemo(() => model ? getStats(model.geometry, scale) : null, [model, scale])
+  const transformedStats = useMemo(() => {
+    if (!model) return null
+    return scale[0] === 1 && scale[1] === 1 && scale[2] === 1
+      ? { area: model.area, volume: model.volume }
+      : getStats(model.geometry, scale)
+  }, [model, scale])
   const [rotateMenuOpen, setRotateMenuOpen] = useState(false)
   const [movePanelOpen, setMovePanelOpen] = useState(false)
   const [scalePanelOpen, setScalePanelOpen] = useState(false)
@@ -586,12 +607,26 @@ function App() {
   const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
   const [showGrid, setShowGrid] = useState(true)
   const [isDragging, setIsDragging] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [isChecking, setIsChecking] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const projectNameInputRef = useRef<HTMLInputElement>(null)
   const cameraControls = useRef<(() => void) | null>(null)
   const viewPresetControls = useRef<((view: ViewPreset) => void) | null>(null)
+  const loadWorkerRef = useRef<Worker | null>(null)
+  const checkWorkerRef = useRef<Worker | null>(null)
+  const cancelCheck = useCallback(() => {
+    checkWorkerRef.current?.terminate()
+    checkWorkerRef.current = null
+    setIsChecking(false)
+  }, [])
+
+  useEffect(() => () => {
+    loadWorkerRef.current?.terminate()
+    checkWorkerRef.current?.terminate()
+  }, [])
 
   useEffect(() => {
     if (!model) return
@@ -603,6 +638,10 @@ function App() {
 
   const loadFile = useCallback((file?: File) => {
     if (!file) return
+    cancelCheck()
+    loadWorkerRef.current?.terminate()
+    loadWorkerRef.current = null
+    setIsProcessing(false)
     setError('')
     setNotice('')
     if (!file.name.toLowerCase().endsWith('.stl')) {
@@ -613,38 +652,75 @@ function App() {
       setError('This file appears to be empty. Please choose another STL.')
       return
     }
-    const reader = new FileReader()
-    reader.onerror = () => setError('We could not read this file. Please try another STL.')
-    reader.onload = () => {
-      try {
-        const source = reader.result as ArrayBuffer
-        const geometry = new STLLoader().parse(source)
-        if (!geometry.getAttribute('position')?.count) throw new Error('No triangles found')
-        geometry.computeBoundingBox()
-        const box = geometry.boundingBox!
-        const dimensions: [number, number, number] = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z]
-        const stats = getStats(geometry)
-        setModel({ name: file.name, size: file.size, triangles: Math.floor(geometry.getAttribute('position').count / 3), dimensions, volume: stats.volume, area: stats.area, geometry, source })
-        setProjectName(file.name.replace(/\.stl$/i, '') || 'Untitled project')
-        setRotation([0, 0, 0])
-        setPosition([0, 0, 0])
-        setScale([1, 1, 1])
-        setUniformScale(true)
-        setMovePanelOpen(false)
-        setScalePanelOpen(false)
-        setAxisDragMode(null)
-        setRotateMode(false)
-        setPlaceOnBedMode(false)
-        setAnalysisResult(null)
-        setCheckPanelOpen(false)
-        setNotice('Model loaded successfully')
-        window.setTimeout(() => setNotice(''), 2800)
-      } catch {
-        setError('This STL could not be parsed. It may be damaged or contain no valid triangles.')
-      }
+
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('./stl-worker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      setError('This browser could not start the STL processing worker.')
+      return
     }
-    reader.readAsArrayBuffer(file)
-  }, [])
+    loadWorkerRef.current = worker
+    setIsProcessing(true)
+    worker.onmessage = event => {
+      if (loadWorkerRef.current !== worker) return
+      loadWorkerRef.current = null
+      worker.terminate()
+      setIsProcessing(false)
+      const result = event.data as STLWorkerResponse
+      if (result.error || !result.positions || !result.normals || !result.dimensions || !result.bounds) {
+        setError(result.error || 'This STL could not be parsed. It may be damaged or contain no valid triangles.')
+        return
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(result.positions), 3))
+      geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(result.normals), 3))
+      const [minX, minY, minZ, maxX, maxY, maxZ] = result.bounds
+      geometry.boundingBox = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ))
+      geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Math.hypot(...result.dimensions.map(value => value * 0.5)))
+      setModel({
+        name: file.name,
+        size: file.size,
+        triangles: result.triangles ?? Math.floor(geometry.getAttribute('position').count / 3),
+        dimensions: result.dimensions,
+        volume: result.volume ?? 0,
+        area: result.area ?? 0,
+        geometry,
+        source: file,
+      })
+      setProjectName(file.name.replace(/\.stl$/i, '') || 'Untitled project')
+      setRotation([0, 0, 0])
+      setPosition([0, 0, 0])
+      setScale([1, 1, 1])
+      setUniformScale(true)
+      setMovePanelOpen(false)
+      setScalePanelOpen(false)
+      setAxisDragMode(null)
+      setRotateMode(false)
+      setPlaceOnBedMode(false)
+      setAnalysisResult(null)
+      setCheckPanelOpen(false)
+      setNotice('Model loaded successfully')
+      window.setTimeout(() => setNotice(''), 2800)
+    }
+    worker.onerror = () => {
+      if (loadWorkerRef.current !== worker) return
+      loadWorkerRef.current = null
+      worker.terminate()
+      setIsProcessing(false)
+      setError('The STL processing worker stopped unexpectedly. Try exporting the STL again or use a smaller file.')
+    }
+    file.arrayBuffer().then(buffer => {
+      if (loadWorkerRef.current !== worker) return
+      worker.postMessage({ buffer }, [buffer])
+    }).catch(() => {
+      if (loadWorkerRef.current !== worker) return
+      loadWorkerRef.current = null
+      worker.terminate()
+      setIsProcessing(false)
+      setError('We could not read this file. Please try another STL.')
+    })
+  }, [cancelCheck])
 
   const chooseFile = () => inputRef.current?.click()
   const resetView = () => cameraControls.current?.()
@@ -668,6 +744,7 @@ function App() {
     setScalePanelOpen(false)
   }
   const toggleCheckPanel = () => {
+    cancelCheck()
     setPlaceOnBedMode(false)
     setMovePanelOpen(false)
     setScalePanelOpen(false)
@@ -701,12 +778,77 @@ function App() {
   }
   const runPrintabilityCheck = () => {
     if (!model) return
-    setAnalysisResult(findUnsupportedOverhangs(model.geometry, rotation, 45, scale, position, 0.2))
+    cancelCheck()
+    setError('')
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('./check-worker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      setError('This browser could not start the printability worker.')
+      return
+    }
+    checkWorkerRef.current = worker
+    setIsChecking(true)
+    let positions: Float32Array
+    let boundsTuple: [number, number, number, number, number, number]
+    try {
+      const positionAttribute = model.geometry.getAttribute('position')
+      positions = (positionAttribute.array as Float32Array).slice()
+      const bounds = model.geometry.boundingBox!
+      boundsTuple = [bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z]
+    } catch {
+      checkWorkerRef.current = null
+      worker.terminate()
+      setIsChecking(false)
+      setError('Not enough memory to prepare this model for the printability check.')
+      return
+    }
+    worker.onmessage = event => {
+      if (checkWorkerRef.current !== worker) return
+      checkWorkerRef.current = null
+      worker.terminate()
+      setIsChecking(false)
+      const result = event.data as CheckWorkerResponse
+      if (result.error || !result.highlightPositions || !result.highlightNormals || !result.supportPositions || !result.supportNormals) {
+        setError(result.error || 'The printability check could not process this model.')
+        return
+      }
+      const highlights = new THREE.BufferGeometry()
+      highlights.setAttribute('position', new THREE.BufferAttribute(new Float32Array(result.highlightPositions), 3))
+      highlights.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(result.highlightNormals), 3))
+      const supports = new THREE.BufferGeometry()
+      supports.setAttribute('position', new THREE.BufferAttribute(new Float32Array(result.supportPositions), 3))
+      supports.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(result.supportNormals), 3))
+      setAnalysisResult({
+        triangleCount: result.triangleCount ?? model.triangles,
+        flaggedTriangles: result.flaggedTriangles ?? 0,
+        flaggedArea: result.flaggedArea ?? 0,
+        limitDegrees: result.limitDegrees ?? 45,
+        highlights,
+        supports,
+      })
+    }
+    worker.onerror = () => {
+      if (checkWorkerRef.current !== worker) return
+      checkWorkerRef.current = null
+      worker.terminate()
+      setIsChecking(false)
+      setError('The printability worker stopped unexpectedly. Try checking a smaller or repaired STL.')
+    }
+    try {
+      worker.postMessage({ positions: positions.buffer, bounds: boundsTuple, rotation, scale, translation: position }, [positions.buffer])
+    } catch {
+      checkWorkerRef.current = null
+      worker.terminate()
+      setIsChecking(false)
+      setError('Not enough memory to run the printability check on this model.')
+    }
   }
   const onRotationChange = useCallback((next: Rotation) => {
+    cancelCheck()
     setRotation(next)
     setAnalysisResult(null)
-  }, [])
+  }, [cancelCheck])
   const onFreeRotateEnd = useCallback(() => {
     setRotateMode(false)
     setRotateMenuOpen(true)
@@ -722,6 +864,7 @@ function App() {
     else setScalePanelOpen(true)
   }, [])
   const onAxisTransform = useCallback((mode: AxisTransformMode, axis: number, delta: number) => {
+    cancelCheck()
     if (mode === 'move') {
       setPosition(current => {
         const next = [...current] as AxisValues
@@ -743,8 +886,9 @@ function App() {
       return next
     })
     setAnalysisResult(null)
-  }, [])
+  }, [cancelCheck])
   const onPlaceSurface = useCallback((surfaceNormal: THREE.Vector3) => {
+    cancelCheck()
     const currentRotation = rotationStateRef.current
     const currentQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
       THREE.MathUtils.degToRad(currentRotation[0]),
@@ -765,18 +909,21 @@ function App() {
     setError('')
     setNotice('Model placed on the selected flat surface')
     window.setTimeout(() => setNotice(''), 2800)
-  }, [])
+  }, [cancelCheck])
   const adjustRotation = (axis: number, amount: number) => {
+    cancelCheck()
     setRotation(current => current.map((value, index) => index === axis ? value + amount : value) as Rotation)
     setAnalysisResult(null)
   }
   const resetModelPosition = () => {
+    cancelCheck()
     setRotation([0, 0, 0])
     setPosition([0, 0, 0])
     setPlaceOnBedMode(false)
     setAnalysisResult(null)
   }
   const resetModelScale = () => {
+    cancelCheck()
     setScale([1, 1, 1])
     setAnalysisResult(null)
   }
@@ -794,7 +941,7 @@ function App() {
       .replace(/\s+/g, ' ')
       .trim() || 'model'
     const fileName = `${safeName}.stl`
-    const url = URL.createObjectURL(new Blob([model.source.slice(0)], { type: 'model/stl' }))
+    const url = URL.createObjectURL(model.source)
     const link = document.createElement('a')
     link.href = url
     link.download = fileName
@@ -826,7 +973,7 @@ function App() {
 
   return <div className="app-shell" onDragOver={event => { event.preventDefault(); setIsDragging(true) }} onDragLeave={event => { if (event.target === event.currentTarget) setIsDragging(false) }} onDrop={onDrop}>
     <header className="topbar">
-      <div className="topbar-actions"><button className="upload-button" onClick={chooseFile}><Upload size={16}/><span>Open STL</span></button></div>
+      <div className="topbar-actions"><button className="upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={16}/><span>{isProcessing ? 'Processing STL…' : 'Open STL'}</span></button></div>
       <input ref={inputRef} type="file" accept=".stl,model/stl" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
     </header>
 
@@ -874,15 +1021,15 @@ function App() {
             <div className="rotate-menu-header"><div><Move size={16}/><strong>Move model</strong></div><button title="Close move panel" aria-label="Close move panel" onClick={() => setMovePanelOpen(false)}><X size={15}/></button></div>
             <p className="analysis-intro">Move the model along the world axes. Values are in millimeters.</p>
             <div className="rotate-menu-label">POSITION · MM</div>
-            {(['X', 'Y', 'Z'] as const).map((axis, index) => <label className="axis-transform-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><input type="number" step="1" value={position[index]} aria-label={`Move on ${axis} axis in millimeters`} onChange={event => { const value = Number(event.target.value); setPosition(current => current.map((item, i) => i === index ? value : item) as AxisValues); setAnalysisResult(null) }}/><span className="axis-transform-unit">mm</span></label>)}
-            <button className="reset-rotation" onClick={() => { setPosition([0, 0, 0]); setAnalysisResult(null) }}><RotateCcw size={14}/> Reset movement</button>
+            {(['X', 'Y', 'Z'] as const).map((axis, index) => <label className="axis-transform-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><input type="number" step="1" value={position[index]} aria-label={`Move on ${axis} axis in millimeters`} onChange={event => { const value = Number(event.target.value); cancelCheck(); setPosition(current => current.map((item, i) => i === index ? value : item) as AxisValues); setAnalysisResult(null) }}/><span className="axis-transform-unit">mm</span></label>)}
+            <button className="reset-rotation" onClick={() => { cancelCheck(); setPosition([0, 0, 0]); setAnalysisResult(null) }}><RotateCcw size={14}/> Reset movement</button>
           </div>}
           {scalePanelOpen && model && <div className="rotate-panel transform-panel" role="dialog" aria-label="Scale model">
             <div className="rotate-menu-header"><div><Maximize size={16}/><strong>Scale model</strong></div><button title="Close scale panel" aria-label="Close scale panel" onClick={() => setScalePanelOpen(false)}><X size={15}/></button></div>
             <p className="analysis-intro">Drag a colored axis to scale, or enter percentages below.</p>
-            <label className="uniform-scale-toggle"><input type="checkbox" checked={uniformScale} onChange={event => { const checked = event.target.checked; setUniformScale(checked); if (checked) setScale(current => [current[0], current[0], current[0]]) }}/><span>Uniform scaling</span></label>
+            <label className="uniform-scale-toggle"><input type="checkbox" checked={uniformScale} onChange={event => { const checked = event.target.checked; cancelCheck(); setAnalysisResult(null); setUniformScale(checked); if (checked) setScale(current => [current[0], current[0], current[0]]) }}/><span>Uniform scaling</span></label>
             <div className="rotate-menu-label">SCALE · PERCENT</div>
-            {(['X', 'Y', 'Z'] as const).map((axis, index) => <label className="axis-transform-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><input type="number" min="1" max="500" step="1" value={Math.round(scale[index] * 100)} aria-label={`Scale ${axis} axis in percent`} onChange={event => { const percent = Math.max(1, Math.min(500, Number(event.target.value) || 1)); setScale(current => uniformScale ? [percent / 100, percent / 100, percent / 100] : current.map((item, i) => i === index ? percent / 100 : item) as AxisValues); setAnalysisResult(null) }}/><span className="axis-transform-unit">%</span></label>)}
+            {(['X', 'Y', 'Z'] as const).map((axis, index) => <label className="axis-transform-row" key={axis}><span className={`rotate-axis-tag axis-${index === 0 ? 'red' : index === 1 ? 'green' : 'blue'}`}>{axis}</span><input type="number" min="1" max="500" step="1" value={Math.round(scale[index] * 100)} aria-label={`Scale ${axis} axis in percent`} onChange={event => { const percent = Math.max(1, Math.min(500, Number(event.target.value) || 1)); cancelCheck(); setScale(current => uniformScale ? [percent / 100, percent / 100, percent / 100] : current.map((item, i) => i === index ? percent / 100 : item) as AxisValues); setAnalysisResult(null) }}/><span className="axis-transform-unit">%</span></label>)}
             <button className="reset-rotation" onClick={resetModelScale}><RotateCcw size={14}/> Reset scale</button>
           </div>}
           {checkPanelOpen && model && <div className="analysis-panel" role="dialog" aria-label="Printability check">
@@ -890,7 +1037,7 @@ function App() {
             <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
             {!analysisResult ? <>
               <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Steep downward faces over 45° are conservatively flagged for support; shallower surfaces use the 45° lateral reach.</p>
-              <button className="run-analysis-button" onClick={runPrintabilityCheck}><Scan size={15}/> Run check</button>
+              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? 'Checking geometry…' : 'Run check'}</button>
             </> : <>
               <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
                 <strong>{analysisResult.flaggedTriangles ? 'Potential supports needed' : 'No unsupported surfaces found'}</strong>
@@ -898,11 +1045,11 @@ function App() {
               </div>
               {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported <i className="support-legend-swatch"/> Green: mock supports</div>}
               <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
-              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck}><Scan size={14}/> Run again</button>
+              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? 'Checking geometry…' : 'Run again'}</button>
             </>}
             <div className="analysis-divider"/>
             <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>
-            {analysisResult && <button className="clear-analysis-button" onClick={() => setAnalysisResult(null)}>Clear highlights</button>}
+            {analysisResult && <button className="clear-analysis-button" onClick={() => { cancelCheck(); setAnalysisResult(null) }}>Clear highlights</button>}
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop your STL to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
@@ -923,7 +1070,7 @@ function App() {
         <div className="inspector-content">
           <div className="section-label">MODEL</div>
           {model ? <>
-            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> STL mesh</span></div><button className="more-button" title="Remove model" onClick={() => { setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
+            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> STL mesh</span></div><button className="more-button" title="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
             <div className="section-label section-gap">DIMENSIONS <span>mm</span></div>
             <div className="dimension-grid"><div className="dim-item"><span className="dim-axis axis-red">X</span><strong>{formatMeasure(model.dimensions[0] * scale[0])}</strong></div><div className="dim-item"><span className="dim-axis axis-green">Y</span><strong>{formatMeasure(model.dimensions[1] * scale[1])}</strong></div><div className="dim-item"><span className="dim-axis axis-blue">Z</span><strong>{formatMeasure(model.dimensions[2] * scale[2])}</strong></div></div>
             <div className="section-label section-gap">MESH STATISTICS</div>

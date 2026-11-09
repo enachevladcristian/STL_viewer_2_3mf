@@ -5,6 +5,8 @@ A browser-based STL viewer for quickly opening and inspecting 3D models. Files a
 ## Features
 
 - Open binary and ASCII `.stl` files, or drag and drop a file into the viewport
+- Parse, center, and calculate mesh statistics in background workers to keep the UI responsive on dense STL files
+- Run the layer-support check in a background worker; large geometry is not duplicated for viewport rendering
 - Rename the project and download the original STL data using that name as the `.stl` filename
 - Interactive 3D preview with orbit, zoom, and reset/fit camera controls
 - Rotate tool with 45° X/Y/Z increments, axis-arrow dragging for constrained rotation, and free rotation by dragging the model
