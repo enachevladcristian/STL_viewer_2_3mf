@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Box, Check, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info, Move,
-  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Scan, Settings2,
+  Box, Check, ChevronDown, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info, Move,
+  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Settings2,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
 import * as THREE from 'three'
@@ -22,6 +22,10 @@ type ModelInfo = {
 }
 
 type CheckWorkerResponse = {
+  stage?: string
+  originalTriangleCount?: number
+  simplified?: boolean
+  simplificationError?: number
   triangleCount?: number
   flaggedTriangles?: number
   flaggedArea?: number
@@ -236,6 +240,67 @@ function makeAxisLabels(length: number) {
   return group
 }
 
+function makeDimensionsOverlay(geometry: THREE.BufferGeometry, scale: AxisValues) {
+  const bounds = geometry.boundingBox!
+  const center = bounds.getCenter(new THREE.Vector3())
+  const size = bounds.getSize(new THREE.Vector3())
+  const half = size.clone().multiplyScalar(0.5)
+  const group = new THREE.Group()
+  group.name = 'model-dimensions'
+
+  const box = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+    new THREE.LineBasicMaterial({ color: '#63748b', transparent: true, opacity: 0.72, depthTest: false }),
+  )
+  box.position.copy(center)
+  box.renderOrder = 25
+  group.add(box)
+
+  const maximum = Math.max(size.x, size.y, size.z, 1)
+  const offset = maximum * 0.09
+  const tick = maximum * 0.025
+  const labelHeight = maximum * 0.085
+  const axes = [
+    { name: 'X', color: 0xd66f70, colorCss: '#d66f70', from: new THREE.Vector3(-half.x, -half.y - offset, half.z + offset), to: new THREE.Vector3(half.x, -half.y - offset, half.z + offset), tickA: new THREE.Vector3(0, tick, 0), value: size.x * scale[0] },
+    { name: 'Y', color: 0x59a27a, colorCss: '#59a27a', from: new THREE.Vector3(half.x + offset, -half.y, half.z + offset), to: new THREE.Vector3(half.x + offset, half.y, half.z + offset), tickA: new THREE.Vector3(tick, 0, 0), value: size.y * scale[1] },
+    { name: 'Z', color: 0x6f92c4, colorCss: '#6f92c4', from: new THREE.Vector3(half.x + offset, -half.y - offset, -half.z), to: new THREE.Vector3(half.x + offset, -half.y - offset, half.z), tickA: new THREE.Vector3(0, tick, 0), value: size.z * scale[2] },
+  ]
+  for (const axis of axes) {
+    const linePoints = [axis.from, axis.to, axis.from.clone().sub(axis.tickA), axis.from.clone().add(axis.tickA), axis.to.clone().sub(axis.tickA), axis.to.clone().add(axis.tickA)]
+    const measureLine = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(linePoints), new THREE.LineBasicMaterial({ color: axis.color, depthTest: false }))
+    measureLine.renderOrder = 26
+    group.add(measureLine)
+
+    const canvas = document.createElement('canvas')
+    canvas.width = 360
+    canvas.height = 88
+    const context = canvas.getContext('2d')
+    if (context) {
+      context.fillStyle = '#ffffffed'
+      context.fillRect(4, 4, 352, 80)
+      context.strokeStyle = axis.colorCss
+      context.lineWidth = 5
+      context.strokeRect(4, 4, 352, 80)
+      context.font = '600 40px Poppins, sans-serif'
+      context.textAlign = 'center'
+      context.textBaseline = 'middle'
+      context.fillStyle = axis.colorCss
+      context.fillText(`${axis.name}  ${axis.value.toFixed(1)} mm`, 180, 45)
+    }
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false }))
+    label.scale.set(labelHeight * 3.8, labelHeight, 1)
+    label.position.copy(axis.from).add(axis.to).multiplyScalar(0.5)
+    if (axis.name === 'X') label.position.z += labelHeight * 0.65
+    if (axis.name === 'Y') label.position.x += labelHeight * 2.0
+    if (axis.name === 'Z') label.position.y += labelHeight * 0.75
+    label.renderOrder = 27
+    group.add(label)
+  }
+  return group
+}
+
 function disposeObjectTree(root: THREE.Object3D) {
   root.traverse(object => {
     const renderable = object as THREE.Mesh
@@ -252,11 +317,12 @@ function disposeObjectTree(root: THREE.Object3D) {
 }
 
 function Viewport({
-  model, showGrid, showAxes, rotation, position, scale, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, supportOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
+  model, showGrid, showAxes, showDimensions, rotation, position, scale, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, supportOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
 }: {
   model: ModelInfo | null
   showGrid: boolean
   showAxes: boolean
+  showDimensions: boolean
   rotation: Rotation
   position: AxisValues
   scale: AxisValues
@@ -453,6 +519,17 @@ function Viewport({
   useEffect(() => {
     const mesh = engineRef.current?.mesh
     if (!mesh) return
+    const previous = mesh.getObjectByName('model-dimensions')
+    if (previous) {
+      mesh.remove(previous)
+      disposeObjectTree(previous)
+    }
+    if (showDimensions && model) mesh.add(makeDimensionsOverlay(model.geometry, scale))
+  }, [model, scale, showDimensions])
+
+  useEffect(() => {
+    const mesh = engineRef.current?.mesh
+    if (!mesh) return
     const previous = mesh.getObjectByName('printability-highlights')
     if (previous) {
       mesh.remove(previous)
@@ -483,7 +560,7 @@ function Viewport({
     if (supportOverlay?.getAttribute('position')?.count) {
       const supportMesh = new THREE.Mesh(
         supportOverlay,
-        new THREE.MeshBasicMaterial({ color: '#50ad91', side: THREE.DoubleSide, transparent: true, opacity: 0.6, depthTest: true, depthWrite: false }),
+        new THREE.MeshBasicMaterial({ color: '#50ad91', side: THREE.DoubleSide, transparent: true, opacity: 0.16, depthTest: true, depthWrite: false }),
       )
       supportMesh.name = 'printability-support-columns'
       supportMesh.renderOrder = 1
@@ -642,9 +719,11 @@ function App() {
   const [checkPanelOpen, setCheckPanelOpen] = useState(false)
   const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
   const [showGrid, setShowGrid] = useState(true)
+  const [showDimensions, setShowDimensions] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isChecking, setIsChecking] = useState(false)
+  const [checkStatus, setCheckStatus] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -657,6 +736,7 @@ function App() {
     checkWorkerRef.current?.terminate()
     checkWorkerRef.current = null
     setIsChecking(false)
+    setCheckStatus('')
   }, [])
 
   useEffect(() => () => {
@@ -885,6 +965,7 @@ function App() {
     }
     checkWorkerRef.current = worker
     setIsChecking(true)
+    setCheckStatus('Preparing analysis…')
     let positions: Float32Array
     let boundsTuple: [number, number, number, number, number, number]
     try {
@@ -896,15 +977,21 @@ function App() {
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
+      setCheckStatus('')
       setError('Not enough memory to prepare this model for the printability check.')
       return
     }
     worker.onmessage = event => {
       if (checkWorkerRef.current !== worker) return
+      const result = event.data as CheckWorkerResponse
+      if (result.stage) {
+        setCheckStatus(result.stage)
+        return
+      }
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
-      const result = event.data as CheckWorkerResponse
+      setCheckStatus('')
       if (result.error || !result.highlightPositions || !result.highlightNormals || !result.supportPositions || !result.supportNormals) {
         setError(result.error || 'The printability check could not process this model.')
         return
@@ -917,6 +1004,9 @@ function App() {
       supports.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(result.supportNormals), 3))
       setAnalysisResult({
         triangleCount: result.triangleCount ?? model.triangles,
+        originalTriangleCount: result.originalTriangleCount ?? model.triangles,
+        simplified: result.simplified ?? false,
+        simplificationError: result.simplificationError,
         flaggedTriangles: result.flaggedTriangles ?? 0,
         flaggedArea: result.flaggedArea ?? 0,
         limitDegrees: result.limitDegrees ?? 45,
@@ -929,6 +1019,7 @@ function App() {
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
+      setCheckStatus('')
       setError('The printability worker stopped unexpectedly. Try checking a smaller or repaired STL.')
     }
     try {
@@ -937,6 +1028,7 @@ function App() {
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
+      setCheckStatus('')
       setError('Not enough memory to run the printability check on this model.')
     }
   }
@@ -1069,11 +1161,6 @@ function App() {
   }
 
   return <div className="app-shell" onDragOver={event => { event.preventDefault(); setIsDragging(true) }} onDragLeave={event => { if (event.target === event.currentTarget) setIsDragging(false) }} onDrop={onDrop}>
-    <header className="topbar">
-      <div className="topbar-actions"><button className="upload-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={16}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button></div>
-      <input ref={inputRef} type="file" accept=".stl,.3mf,model/stl,application/vnd.ms-package.3dmanufacturing-3dmodel+xml" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
-    </header>
-
     <main className="workspace">
       <section className="canvas-panel">
         <div className="canvas-header">
@@ -1098,12 +1185,13 @@ function App() {
         </div>
 
         <div className={`canvas-body${(rotateMenuOpen || movePanelOpen || scalePanelOpen || checkPanelOpen) && model ? ' with-rotate-panel' : ''}`}>
-          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} rotation={rotation} position={position} scale={scale} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} supportOverlay={analysisResult?.supports ?? null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
+          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} showDimensions={showDimensions} rotation={rotation} position={position} scale={scale} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} supportOverlay={analysisResult?.supports ?? null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
           {model && <div className="left-tool-rail">
             <button className={`left-tool-button ${rotateMenuOpen || rotateMode || placeOnBedMode ? 'selected' : ''}`} title="Open rotate tools" aria-label="Open rotate tools" aria-expanded={rotateMenuOpen} onClick={toggleRotatePanel}><Rotate3D size={18}/><span>Rotate</span></button>
             <button className={`left-tool-button ${movePanelOpen || axisDragMode === 'move' ? 'selected' : ''}`} title="Move model" aria-label="Move model" aria-expanded={movePanelOpen} onClick={toggleMovePanel}><Move size={18}/><span>Move</span></button>
             <button className={`left-tool-button ${scalePanelOpen || axisDragMode === 'scale' ? 'selected' : ''}`} title="Scale model" aria-label="Scale model" aria-expanded={scalePanelOpen} onClick={toggleScalePanel}><Maximize size={18}/><span>Scale</span></button>
             <button className={`left-tool-button ${checkPanelOpen || analysisResult ? 'selected' : ''}`} title="Check printability" aria-label="Check printability" aria-pressed={checkPanelOpen || Boolean(analysisResult)} onClick={toggleCheckPanel}><Scan size={18}/><span>Check</span></button>
+            <button className={`left-tool-button ${showDimensions ? 'selected' : ''}`} title="Show measured bounding box" aria-label="Show measured bounding box" aria-pressed={showDimensions} onClick={() => setShowDimensions(value => !value)} disabled={!model}><Ruler size={18}/></button>
           </div>}
           {rotateMenuOpen && model && <div className="rotate-panel" role="dialog" aria-label="Rotate model">
             <div className="rotate-menu-header"><div><Rotate3D size={16}/><strong>Rotate model</strong></div><button title="Close rotate menu" aria-label="Close rotate menu" onClick={closeRotatePanel}><X size={15}/></button></div>
@@ -1133,20 +1221,23 @@ function App() {
             <div className="rotate-menu-header"><div><Scan size={16}/><strong>Printability check</strong></div><button title="Close printability panel" aria-label="Close printability panel" onClick={() => setCheckPanelOpen(false)}><X size={15}/></button></div>
             <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
             {!analysisResult ? <>
-              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Steep downward faces over 45° are conservatively flagged for support; shallower surfaces use the 45° lateral reach.</p>
-              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? 'Checking geometry…' : 'Run check'}</button>
+              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Green shows only the box-minus-model volume that rises from the bed to the model.</p>
+              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run check'}</button>
             </> : <>
               <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
                 <strong>{analysisResult.flaggedTriangles ? 'Potential supports needed' : 'No unsupported surfaces found'}</strong>
-                <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} triangles are flagged for support</span>
+                <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} analyzed triangles are flagged for support</span>
+                {analysisResult.simplified && <span className="analysis-approx-note">Quick approximate analysis: simplified from {analysisResult.originalTriangleCount?.toLocaleString()} triangles. The displayed model and export are unchanged.</span>}
               </div>
-              {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported <i className="support-legend-swatch"/> Green: mock supports</div>}
+              {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
+              <div className="analysis-legend"><i className="support-legend-swatch"/> Green: bed-to-model difference (voxelized)</div>
+              <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
               <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
-              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? 'Checking geometry…' : 'Run again'}</button>
+              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run again'}</button>
             </>}
             <div className="analysis-divider"/>
             <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>
-            {analysisResult && <button className="clear-analysis-button" onClick={() => { cancelCheck(); setAnalysisResult(null) }}>Clear highlights</button>}
+            {analysisResult && <button className="clear-analysis-button" title="Remove check highlights and preview" onClick={() => { cancelCheck(); setAnalysisResult(null) }}><X size={14}/> Clear highlights</button>}
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
@@ -1167,11 +1258,17 @@ function App() {
         <div className="inspector-content">
           <div className="section-label">MODEL</div>
           {model ? <>
-            <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> {model.format} mesh</span></div><button className="more-button" title="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
+            <div className="model-card"><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)}</span></div><button className="more-button" title="Remove model" aria-label="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
             <div className="section-label section-gap">DIMENSIONS <span>mm</span></div>
-            <div className="dimension-grid"><div className="dim-item"><span className="dim-axis axis-red">X</span><strong>{formatMeasure(model.dimensions[0] * scale[0])}</strong></div><div className="dim-item"><span className="dim-axis axis-green">Y</span><strong>{formatMeasure(model.dimensions[1] * scale[1])}</strong></div><div className="dim-item"><span className="dim-axis axis-blue">Z</span><strong>{formatMeasure(model.dimensions[2] * scale[2])}</strong></div></div>
-            <div className="section-label section-gap">MESH STATISTICS</div>
-            <div className="stat-list"><div><span><Triangle size={14}/> Triangles</span><strong>{model.triangles.toLocaleString()}</strong></div><div><span><Scan size={14}/> Surface area</span><strong>{(transformedStats?.area ?? model.area).toFixed(2)} mm²</strong></div><div><span><Box size={14}/> Volume</span><strong>{(transformedStats?.volume ?? model.volume).toFixed(2)} mm³</strong></div></div>
+            <table className="dimensions-table" aria-label="Model dimensions in millimeters"><tbody>
+              <tr><th scope="row"><span className="dim-axis axis-red">X</span><span>:</span></th><td>{formatMeasure(model.dimensions[0] * scale[0])}</td></tr>
+              <tr><th scope="row"><span className="dim-axis axis-green">Y</span><span>:</span></th><td>{formatMeasure(model.dimensions[1] * scale[1])}</td></tr>
+              <tr><th scope="row"><span className="dim-axis axis-blue">Z</span><span>:</span></th><td>{formatMeasure(model.dimensions[2] * scale[2])}</td></tr>
+            </tbody></table>
+            <details className="mesh-statistics-dropdown">
+              <summary className="section-label section-gap"><span>MESH STATISTICS</span><ChevronDown size={14}/></summary>
+              <div className="stat-list"><div><span><Triangle size={14}/> Triangles</span><strong>{model.triangles.toLocaleString()}</strong></div><div><span><Scan size={14}/> Surface area</span><strong>{(transformedStats?.area ?? model.area).toFixed(2)} mm²</strong></div><div><span><Box size={14}/> Volume</span><strong>{(transformedStats?.volume ?? model.volume).toFixed(2)} mm³</strong></div></div>
+            </details>
             {model.format === '3MF' && <>
               <div className="section-label section-gap">3MF PRINT PARAMETERS <span>{model.parameters.length}</span></div>
               {model.parameters.length ? <div className="parameter-list">{model.parameters.map((parameter, index) => <div className="parameter-row" key={`${parameter.key}-${index}`} title={`Found in ${parameter.source}`}><span>{parameter.key}</span><strong>{parameter.value}</strong></div>)}</div> : <div className="parameter-empty">This 3MF contains model data, but no readable slicer settings were found. Settings can vary by slicer.</div>}
@@ -1183,9 +1280,10 @@ function App() {
             <div className="privacy-note"><ShieldCheck size={16}/><span>Your files never leave your device. Processing happens locally in your browser.</span></div>
           </>}
         </div>
+        <button className="upload-button bottom-open-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={18}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button>
       </aside>
     </main>
-    <div className="mobile-upload" onClick={chooseFile}><Upload size={16}/> Open STL</div>
+    <input ref={inputRef} type="file" accept=".stl,.3mf,model/stl,application/vnd.ms-package.3dmanufacturing-3dmodel+xml" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
   </div>
 }
 
