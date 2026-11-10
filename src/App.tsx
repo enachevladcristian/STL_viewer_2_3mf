@@ -1260,7 +1260,11 @@ function App() {
           {model ? <>
             <div className="model-card"><div className="model-thumb"><div className="thumb-shape"><Box size={25}/></div></div><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)} <b>·</b> {model.format} mesh</span></div><button className="more-button" title="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
             <div className="section-label section-gap">DIMENSIONS <span>mm</span></div>
-            <div className="dimension-grid"><div className="dim-item"><span className="dim-axis axis-red">X</span><strong>{formatMeasure(model.dimensions[0] * scale[0])}</strong></div><div className="dim-item"><span className="dim-axis axis-green">Y</span><strong>{formatMeasure(model.dimensions[1] * scale[1])}</strong></div><div className="dim-item"><span className="dim-axis axis-blue">Z</span><strong>{formatMeasure(model.dimensions[2] * scale[2])}</strong></div></div>
+            <table className="dimensions-table" aria-label="Model dimensions in millimeters"><tbody>
+              <tr><th scope="row"><span className="dim-axis axis-red">X</span><span>:</span></th><td>{formatMeasure(model.dimensions[0] * scale[0])}</td></tr>
+              <tr><th scope="row"><span className="dim-axis axis-green">Y</span><span>:</span></th><td>{formatMeasure(model.dimensions[1] * scale[1])}</td></tr>
+              <tr><th scope="row"><span className="dim-axis axis-blue">Z</span><span>:</span></th><td>{formatMeasure(model.dimensions[2] * scale[2])}</td></tr>
+            </tbody></table>
             <details className="mesh-statistics-dropdown">
               <summary className="section-label section-gap"><span>MESH STATISTICS</span><ChevronDown size={14}/></summary>
               <div className="stat-list"><div><span><Triangle size={14}/> Triangles</span><strong>{model.triangles.toLocaleString()}</strong></div><div><span><Scan size={14}/> Surface area</span><strong>{(transformedStats?.area ?? model.area).toFixed(2)} mm²</strong></div><div><span><Box size={14}/> Volume</span><strong>{(transformedStats?.volume ?? model.volume).toFixed(2)} mm³</strong></div></div>
