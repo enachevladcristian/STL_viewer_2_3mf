@@ -1275,9 +1275,7 @@ function App() {
             </>}
             <div className="health-card"><div className="health-icon"><Check size={14}/></div><div><strong>Mesh loaded</strong><span>Ready to inspect in 3D</span></div><span className="health-dot"/></div>
           </> : <>
-            <div className="empty-model"><div className="empty-icon"><Box size={20}/></div><strong>No model open</strong><p>Upload an STL or 3MF file to inspect its mesh and available print settings.</p><button onClick={chooseFile}><Upload size={14}/> Open file</button></div>
-            <div className="section-label section-gap">SUPPORTED FORMATS</div><div className="format-row"><span className="format-chip">STL</span><div><strong>STereoLithography</strong><span>Binary and ASCII meshes</span></div><Check size={15}/></div><div className="format-row"><span className="format-chip">3MF</span><div><strong>3D Manufacturing Format</strong><span>Mesh and embedded print settings</span></div><Check size={15}/></div>
-            <div className="privacy-note"><ShieldCheck size={16}/><span>Your files never leave your device. Processing happens locally in your browser.</span></div>
+            <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile}><Upload size={15}/> Open file</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
         </div>
         <button className="upload-button bottom-open-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={18}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button>
