@@ -16,7 +16,7 @@ A browser-based STL viewer for quickly opening and inspecting 3D models. Files a
 - Move the model along visible X/Y/Z handles or enter millimeter offsets; horizontal movement stays within the build plate
 - Scale with visible axis handles or percentage inputs, with uniform scaling enabled by default and independent X/Y/Z scaling available
 - Move, rotate, and scale are viewport transforms; downloads preserve the original STL data
-- Preliminary FDM check marks unsupported surface triangles red and previews the voxelized difference between an 8%-padded bounding box (at least 2 mm) and the model in translucent green; this envelope is a visualization, not print-ready supports
+- Preliminary FDM check marks unsupported surface triangles red and previews only the voxelized box-minus-model columns that rise from the bed to the model; the box is padded by 8% (at least 2 mm), and the green preview is not print-ready support material
 - A 220 × 220 mm reference build plate with a ground grid
 - Toggle the ground grid
 - Inspect model dimensions, triangle count, approximate surface area, and volume

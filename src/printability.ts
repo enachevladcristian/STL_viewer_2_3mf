@@ -137,7 +137,7 @@ function buildBoundingBoxDifference(data: TriangleData) {
   }
   const padding = Math.max(Math.max(maxX - minX, maxY - minY, maxZ - minZ) * 0.08, 2)
   const outerMinX = minX - padding, outerMaxX = maxX + padding
-  const outerMinY = Math.max(0, minY - padding), outerMaxY = maxY + padding
+  const outerMinY = 0, outerMaxY = maxY + padding
   const outerMinZ = minZ - padding, outerMaxZ = maxZ + padding
   const longest = Math.max(outerMaxX - outerMinX, outerMaxY - outerMinY, outerMaxZ - outerMinZ, 1e-6)
   const cellSize = longest / 28
@@ -154,9 +154,35 @@ function buildBoundingBoxDifference(data: TriangleData) {
       const z = outerMinZ + (k + 0.5) * dz
       for (let i = 0; i < nx; i += 1) {
         const x = outerMinX + (i + 0.5) * dx
-        if (isInsideAt(data, x, y, z)) occupancy[cellIndex(i, j, k)] = 1
+        // Nudge voxel centers off common STL triangle seams so a face diagonal
+        // is not misread as two crossings by the odd/even inside test.
+        if (isInsideAt(data, x, y + dy * 0.137, z + dz * 0.271)) occupancy[cellIndex(i, j, k)] = 1
       }
     }
+  }
+
+  const supportMask = new Uint8Array(occupancy.length)
+  const firstModelCells = new Int16Array(nx * nz).fill(-1)
+  const contactHeights = new Float32Array(nx * nz)
+  for (let k = 0; k < nz; k += 1) for (let i = 0; i < nx; i += 1) {
+    const column = k * nx + i
+    const x = outerMinX + (i + 0.5) * dx
+    const z = outerMinZ + (k + 0.5) * dz + dz * 0.271
+    let firstModelCell = -1
+    for (let j = 0; j < ny; j += 1) {
+      if (occupancy[cellIndex(i, j, k)]) { firstModelCell = j; break }
+    }
+    if (firstModelCell < 0) continue
+    firstModelCells[column] = firstModelCell
+    let low = outerMinY
+    let high = outerMinY + (firstModelCell + 0.5) * dy + dy * 0.137
+    for (let iteration = 0; iteration < 12; iteration += 1) {
+      const middle = (low + high) * 0.5
+      if (isInsideAt(data, x, middle + dy * 0.137, z)) high = middle
+      else low = middle
+    }
+    contactHeights[column] = high
+    for (let j = 0; j < firstModelCell; j += 1) supportMask[cellIndex(i, j, k)] = 1
   }
 
   const positions: number[] = []
@@ -169,14 +195,17 @@ function buildBoundingBoxDifference(data: TriangleData) {
     { step: [0, 0, -1], points: (x0: number, x1: number, y0: number, y1: number, z0: number, _z1: number) => [[x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0]] },
   ]
   for (let j = 0; j < ny; j += 1) for (let k = 0; k < nz; k += 1) for (let i = 0; i < nx; i += 1) {
-    if (occupancy[cellIndex(i, j, k)]) continue
+    if (!supportMask[cellIndex(i, j, k)]) continue
     const x0 = outerMinX + i * dx, x1 = x0 + dx
-    const y0 = outerMinY + j * dy, y1 = y0 + dy
+    const y0 = outerMinY + j * dy
+    let y1 = y0 + dy
+    const column = k * nx + i
+    if (firstModelCells[column] === j + 1) y1 = Math.max(y0, contactHeights[column])
     const z0 = outerMinZ + k * dz, z1 = z0 + dz
     for (const face of faces) {
       const ni = i + face.step[0], nj = j + face.step[1], nk = k + face.step[2]
       const outside = ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz
-      if (!outside && !occupancy[cellIndex(ni, nj, nk)]) continue
+      if (!outside && supportMask[cellIndex(ni, nj, nk)]) continue
       const quad = face.points(x0, x1, y0, y1, z0, z1)
       const a = quad[0], b = quad[1], c = quad[2], d = quad[3]
       positions.push(...a, ...b, ...c, ...a, ...c, ...d)

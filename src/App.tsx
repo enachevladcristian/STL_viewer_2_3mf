@@ -1208,7 +1208,7 @@ function App() {
             <div className="rotate-menu-header"><div><Scan size={16}/><strong>Printability check</strong></div><button title="Close printability panel" aria-label="Close printability panel" onClick={() => setCheckPanelOpen(false)}><X size={15}/></button></div>
             <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
             {!analysisResult ? <>
-              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. The green preview shows an expanded bounding volume with the model subtracted.</p>
+              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Green shows only the box-minus-model volume that rises from the bed to the model.</p>
               <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? 'Checking geometry…' : 'Run check'}</button>
             </> : <>
               <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
@@ -1216,7 +1216,7 @@ function App() {
                 <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} triangles are flagged for support</span>
               </div>
               {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
-              <div className="analysis-legend"><i className="support-legend-swatch"/> Green: padded box − model (voxelized preview)</div>
+              <div className="analysis-legend"><i className="support-legend-swatch"/> Green: bed-to-model difference (voxelized)</div>
               <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
               <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
               <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? 'Checking geometry…' : 'Run again'}</button>
