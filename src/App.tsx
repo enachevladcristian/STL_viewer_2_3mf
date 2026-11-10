@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Box, Check, ChevronDown, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info, Move,
+  Box, Check, ChevronDown, CloudUpload, FileBox, FileUp, Grid2X2, Info, Move,
   Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Settings2,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
@@ -18,7 +18,6 @@ type ModelInfo = {
   volume: number
   area: number
   geometry: THREE.BufferGeometry
-  source: File
 }
 
 type CheckWorkerResponse = {
@@ -144,35 +143,6 @@ function getStats(geometry: THREE.BufferGeometry, scaleFactors: AxisValues = [1,
     area += normal.crossVectors(edge1, edge2).length() / 2
   }
   return { volume: Math.abs(volume), area }
-}
-
-function makeBinarySTL(geometry: THREE.BufferGeometry) {
-  const position = geometry.getAttribute('position')
-  const index = geometry.getIndex()
-  const triangleCount = Math.floor((index?.count ?? position.count) / 3)
-  const buffer = new ArrayBuffer(84 + triangleCount * 50)
-  const bytes = new Uint8Array(buffer)
-  new TextEncoder().encode('STL Viewer export from 3MF model').forEach((byte, i) => { bytes[i] = byte })
-  const view = new DataView(buffer)
-  view.setUint32(80, triangleCount, true)
-  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
-  const normal = new THREE.Vector3(), edge1 = new THREE.Vector3(), edge2 = new THREE.Vector3()
-  let offset = 84
-  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
-    const base = triangle * 3
-    const ia = index ? index.getX(base) : base
-    const ib = index ? index.getX(base + 1) : base + 1
-    const ic = index ? index.getX(base + 2) : base + 2
-    a.fromBufferAttribute(position, ia); b.fromBufferAttribute(position, ib); c.fromBufferAttribute(position, ic)
-    normal.crossVectors(edge1.subVectors(b, a), edge2.subVectors(c, a)).normalize()
-    for (const value of [normal.x, normal.y, normal.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]) {
-      view.setFloat32(offset, value, true)
-      offset += 4
-    }
-    view.setUint16(offset, 0, true)
-    offset += 2
-  }
-  return new Blob([buffer], { type: 'model/stl' })
 }
 
 function makeAxisLabels(length: number) {
@@ -798,7 +768,7 @@ function App() {
         setModel({
           name: file.name, size: file.size, format: '3MF', parameters: result.parameters ?? [],
           triangles: result.triangles ?? Math.floor(geometry.getAttribute('position').count / 3),
-          dimensions: result.dimensions, volume: result.volume ?? 0, area: result.area ?? 0, geometry, source: file,
+          dimensions: result.dimensions, volume: result.volume ?? 0, area: result.area ?? 0, geometry,
         })
         setProjectName(file.name.replace(/\.3mf$/i, '') || 'Untitled project')
         setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setUniformScale(true)
@@ -862,7 +832,6 @@ function App() {
         volume: result.volume ?? 0,
         area: result.area ?? 0,
         geometry,
-        source: file,
       })
       setProjectName(file.name.replace(/\.stl$/i, '') || 'Untitled project')
       setRotation([0, 0, 0])
@@ -1121,28 +1090,6 @@ function App() {
     setRotateMode(false)
     setError('')
   }
-  const downloadModel = () => {
-    if (!model) return
-    const safeName = projectName.trim()
-      .replace(/\.stl$/i, '')
-      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
-      .replace(/\s+/g, ' ')
-      .trim() || 'model'
-    const fileName = `${safeName}.stl`
-    const stlFile = model.format === 'STL' ? model.source : makeBinarySTL(model.geometry)
-    const url = URL.createObjectURL(stlFile)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = fileName
-    link.style.display = 'none'
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
-    setNotice(`Downloading ${fileName}`)
-    window.setTimeout(() => setNotice(''), 2800)
-  }
-
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'o') {
@@ -1173,13 +1120,9 @@ function App() {
             {model && <span className="local-badge"><ShieldCheck size={12}/> Local file</span>}
           </div>
           <div className="canvas-actions">
-            <button className="download-project-button" title="Download STL using the project name" onClick={downloadModel} disabled={!model}><Download size={15}/><span>Download STL</span></button>
-            <span className="tool-separator"/>
             <button className={`canvas-tool ${showGrid ? 'selected' : ''}`} title="Toggle grid" onClick={() => setShowGrid(value => !value)}><Grid2X2 size={16}/></button>
             <span className="tool-separator"/>
             <button className="canvas-tool" title="Fit model to view" onClick={resetView}><Maximize size={16}/></button>
-            <span className="tool-separator"/>
-            <button className="canvas-tool fullscreen-tool" title="Fullscreen" onClick={() => document.querySelector('.canvas-panel')?.requestFullscreen?.()}><Expand size={16}/></button>
           </div>
 
         </div>
@@ -1275,12 +1218,9 @@ function App() {
             </>}
             <div className="health-card"><div className="health-icon"><Check size={14}/></div><div><strong>Mesh loaded</strong><span>Ready to inspect in 3D</span></div><span className="health-dot"/></div>
           </> : <>
-            <div className="empty-model"><div className="empty-icon"><Box size={20}/></div><strong>No model open</strong><p>Upload an STL or 3MF file to inspect its mesh and available print settings.</p><button onClick={chooseFile}><Upload size={14}/> Open file</button></div>
-            <div className="section-label section-gap">SUPPORTED FORMATS</div><div className="format-row"><span className="format-chip">STL</span><div><strong>STereoLithography</strong><span>Binary and ASCII meshes</span></div><Check size={15}/></div><div className="format-row"><span className="format-chip">3MF</span><div><strong>3D Manufacturing Format</strong><span>Mesh and embedded print settings</span></div><Check size={15}/></div>
-            <div className="privacy-note"><ShieldCheck size={16}/><span>Your files never leave your device. Processing happens locally in your browser.</span></div>
+            <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
         </div>
-        <button className="upload-button bottom-open-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={18}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button>
       </aside>
     </main>
     <input ref={inputRef} type="file" accept=".stl,.3mf,model/stl,application/vnd.ms-package.3dmanufacturing-3dmodel+xml" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
