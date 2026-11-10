@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Check, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info, Move,
-  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Scan, Settings2,
+  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Settings2,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
 import * as THREE from 'three'
@@ -236,6 +236,67 @@ function makeAxisLabels(length: number) {
   return group
 }
 
+function makeDimensionsOverlay(geometry: THREE.BufferGeometry, scale: AxisValues) {
+  const bounds = geometry.boundingBox!
+  const center = bounds.getCenter(new THREE.Vector3())
+  const size = bounds.getSize(new THREE.Vector3())
+  const half = size.clone().multiplyScalar(0.5)
+  const group = new THREE.Group()
+  group.name = 'model-dimensions'
+
+  const box = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+    new THREE.LineBasicMaterial({ color: '#63748b', transparent: true, opacity: 0.72, depthTest: false }),
+  )
+  box.position.copy(center)
+  box.renderOrder = 25
+  group.add(box)
+
+  const maximum = Math.max(size.x, size.y, size.z, 1)
+  const offset = maximum * 0.09
+  const tick = maximum * 0.025
+  const labelHeight = maximum * 0.085
+  const axes = [
+    { name: 'X', color: 0xd66f70, colorCss: '#d66f70', from: new THREE.Vector3(-half.x, -half.y - offset, half.z + offset), to: new THREE.Vector3(half.x, -half.y - offset, half.z + offset), tickA: new THREE.Vector3(0, tick, 0), value: size.x * scale[0] },
+    { name: 'Y', color: 0x59a27a, colorCss: '#59a27a', from: new THREE.Vector3(half.x + offset, -half.y, half.z + offset), to: new THREE.Vector3(half.x + offset, half.y, half.z + offset), tickA: new THREE.Vector3(tick, 0, 0), value: size.y * scale[1] },
+    { name: 'Z', color: 0x6f92c4, colorCss: '#6f92c4', from: new THREE.Vector3(half.x + offset, -half.y - offset, -half.z), to: new THREE.Vector3(half.x + offset, -half.y - offset, half.z), tickA: new THREE.Vector3(0, tick, 0), value: size.z * scale[2] },
+  ]
+  for (const axis of axes) {
+    const linePoints = [axis.from, axis.to, axis.from.clone().sub(axis.tickA), axis.from.clone().add(axis.tickA), axis.to.clone().sub(axis.tickA), axis.to.clone().add(axis.tickA)]
+    const measureLine = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(linePoints), new THREE.LineBasicMaterial({ color: axis.color, depthTest: false }))
+    measureLine.renderOrder = 26
+    group.add(measureLine)
+
+    const canvas = document.createElement('canvas')
+    canvas.width = 360
+    canvas.height = 88
+    const context = canvas.getContext('2d')
+    if (context) {
+      context.fillStyle = '#ffffffed'
+      context.fillRect(4, 4, 352, 80)
+      context.strokeStyle = axis.colorCss
+      context.lineWidth = 5
+      context.strokeRect(4, 4, 352, 80)
+      context.font = '600 40px Poppins, sans-serif'
+      context.textAlign = 'center'
+      context.textBaseline = 'middle'
+      context.fillStyle = axis.colorCss
+      context.fillText(`${axis.name}  ${axis.value.toFixed(1)} mm`, 180, 45)
+    }
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false }))
+    label.scale.set(labelHeight * 3.8, labelHeight, 1)
+    label.position.copy(axis.from).add(axis.to).multiplyScalar(0.5)
+    if (axis.name === 'X') label.position.z += labelHeight * 0.65
+    if (axis.name === 'Y') label.position.x += labelHeight * 2.0
+    if (axis.name === 'Z') label.position.y += labelHeight * 0.75
+    label.renderOrder = 27
+    group.add(label)
+  }
+  return group
+}
+
 function disposeObjectTree(root: THREE.Object3D) {
   root.traverse(object => {
     const renderable = object as THREE.Mesh
@@ -252,11 +313,12 @@ function disposeObjectTree(root: THREE.Object3D) {
 }
 
 function Viewport({
-  model, showGrid, showAxes, rotation, position, scale, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, supportOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
+  model, showGrid, showAxes, showDimensions, rotation, position, scale, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, supportOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
 }: {
   model: ModelInfo | null
   showGrid: boolean
   showAxes: boolean
+  showDimensions: boolean
   rotation: Rotation
   position: AxisValues
   scale: AxisValues
@@ -453,6 +515,17 @@ function Viewport({
   useEffect(() => {
     const mesh = engineRef.current?.mesh
     if (!mesh) return
+    const previous = mesh.getObjectByName('model-dimensions')
+    if (previous) {
+      mesh.remove(previous)
+      disposeObjectTree(previous)
+    }
+    if (showDimensions && model) mesh.add(makeDimensionsOverlay(model.geometry, scale))
+  }, [model, scale, showDimensions])
+
+  useEffect(() => {
+    const mesh = engineRef.current?.mesh
+    if (!mesh) return
     const previous = mesh.getObjectByName('printability-highlights')
     if (previous) {
       mesh.remove(previous)
@@ -642,6 +715,7 @@ function App() {
   const [checkPanelOpen, setCheckPanelOpen] = useState(false)
   const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
   const [showGrid, setShowGrid] = useState(true)
+  const [showDimensions, setShowDimensions] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isChecking, setIsChecking] = useState(false)
@@ -1098,12 +1172,13 @@ function App() {
         </div>
 
         <div className={`canvas-body${(rotateMenuOpen || movePanelOpen || scalePanelOpen || checkPanelOpen) && model ? ' with-rotate-panel' : ''}`}>
-          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} rotation={rotation} position={position} scale={scale} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} supportOverlay={analysisResult?.supports ?? null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
+          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} showDimensions={showDimensions} rotation={rotation} position={position} scale={scale} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} supportOverlay={analysisResult?.supports ?? null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
           {model && <div className="left-tool-rail">
             <button className={`left-tool-button ${rotateMenuOpen || rotateMode || placeOnBedMode ? 'selected' : ''}`} title="Open rotate tools" aria-label="Open rotate tools" aria-expanded={rotateMenuOpen} onClick={toggleRotatePanel}><Rotate3D size={18}/><span>Rotate</span></button>
             <button className={`left-tool-button ${movePanelOpen || axisDragMode === 'move' ? 'selected' : ''}`} title="Move model" aria-label="Move model" aria-expanded={movePanelOpen} onClick={toggleMovePanel}><Move size={18}/><span>Move</span></button>
             <button className={`left-tool-button ${scalePanelOpen || axisDragMode === 'scale' ? 'selected' : ''}`} title="Scale model" aria-label="Scale model" aria-expanded={scalePanelOpen} onClick={toggleScalePanel}><Maximize size={18}/><span>Scale</span></button>
             <button className={`left-tool-button ${checkPanelOpen || analysisResult ? 'selected' : ''}`} title="Check printability" aria-label="Check printability" aria-pressed={checkPanelOpen || Boolean(analysisResult)} onClick={toggleCheckPanel}><Scan size={18}/><span>Check</span></button>
+            <button className={`left-tool-button ${showDimensions ? 'selected' : ''}`} title="Show measured bounding box" aria-label="Show measured bounding box" aria-pressed={showDimensions} onClick={() => setShowDimensions(value => !value)} disabled={!model}><Ruler size={18}/><span>Dimensions</span></button>
           </div>}
           {rotateMenuOpen && model && <div className="rotate-panel" role="dialog" aria-label="Rotate model">
             <div className="rotate-menu-header"><div><Rotate3D size={16}/><strong>Rotate model</strong></div><button title="Close rotate menu" aria-label="Close rotate menu" onClick={closeRotatePanel}><X size={15}/></button></div>

@@ -11,6 +11,7 @@ A browser-based STL viewer for quickly opening and inspecting 3D models. Files a
 - Run the layer-support check in a background worker; large geometry is not duplicated for viewport rendering
 - Rename the project and download the original STL data using that name as the `.stl` filename
 - Interactive 3D preview with orbit, zoom, and reset/fit camera controls
+- Toggle a measured bounding box with colored X/Y/Z dimension callouts around the model
 - Rotate tool with 45° X/Y/Z increments, axis-arrow dragging for constrained rotation, and free rotation by dragging the model
 - Move the model along visible X/Y/Z handles or enter millimeter offsets; horizontal movement stays within the build plate
 - Scale with visible axis handles or percentage inputs, with uniform scaling enabled by default and independent X/Y/Z scaling available
