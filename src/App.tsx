@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Box, Check, ChevronDown, CloudUpload, Download, Expand, FileBox, FileUp, Grid2X2, Info, Move,
+  Box, Check, ChevronDown, CloudUpload, Download, FileBox, FileUp, Grid2X2, Info, Move,
   Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Settings2,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
@@ -1179,7 +1179,6 @@ function App() {
             <span className="tool-separator"/>
             <button className="canvas-tool" title="Fit model to view" onClick={resetView}><Maximize size={16}/></button>
             <span className="tool-separator"/>
-            <button className="canvas-tool fullscreen-tool" title="Fullscreen" onClick={() => document.querySelector('.canvas-panel')?.requestFullscreen?.()}><Expand size={16}/></button>
           </div>
 
         </div>
