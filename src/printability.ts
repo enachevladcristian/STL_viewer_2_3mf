@@ -128,6 +128,66 @@ function isInsideAt(data: TriangleData, x: number, y: number, z: number) {
   return intersections % 2 === 1
 }
 
+function buildBoundingBoxDifference(data: TriangleData) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
+  for (let i = 0; i < data.positions.length; i += 3) {
+    minX = Math.min(minX, data.positions[i]); maxX = Math.max(maxX, data.positions[i])
+    minY = Math.min(minY, data.positions[i + 1]); maxY = Math.max(maxY, data.positions[i + 1])
+    minZ = Math.min(minZ, data.positions[i + 2]); maxZ = Math.max(maxZ, data.positions[i + 2])
+  }
+  const padding = Math.max(Math.max(maxX - minX, maxY - minY, maxZ - minZ) * 0.08, 2)
+  const outerMinX = minX - padding, outerMaxX = maxX + padding
+  const outerMinY = Math.max(0, minY - padding), outerMaxY = maxY + padding
+  const outerMinZ = minZ - padding, outerMaxZ = maxZ + padding
+  const longest = Math.max(outerMaxX - outerMinX, outerMaxY - outerMinY, outerMaxZ - outerMinZ, 1e-6)
+  const cellSize = longest / 28
+  const nx = Math.max(1, Math.ceil((outerMaxX - outerMinX) / cellSize))
+  const ny = Math.max(1, Math.ceil((outerMaxY - outerMinY) / cellSize))
+  const nz = Math.max(1, Math.ceil((outerMaxZ - outerMinZ) / cellSize))
+  const dx = (outerMaxX - outerMinX) / nx, dy = (outerMaxY - outerMinY) / ny, dz = (outerMaxZ - outerMinZ) / nz
+  const occupancy = new Uint8Array(nx * ny * nz)
+  const cellIndex = (i: number, j: number, k: number) => (j * nz + k) * nx + i
+
+  for (let j = 0; j < ny; j += 1) {
+    const y = outerMinY + (j + 0.5) * dy
+    for (let k = 0; k < nz; k += 1) {
+      const z = outerMinZ + (k + 0.5) * dz
+      for (let i = 0; i < nx; i += 1) {
+        const x = outerMinX + (i + 0.5) * dx
+        if (isInsideAt(data, x, y, z)) occupancy[cellIndex(i, j, k)] = 1
+      }
+    }
+  }
+
+  const positions: number[] = []
+  const faces = [
+    { step: [1, 0, 0], points: (_x0: number, x1: number, y0: number, y1: number, z0: number, z1: number) => [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]] },
+    { step: [-1, 0, 0], points: (x0: number, _x1: number, y0: number, y1: number, z0: number, z1: number) => [[x0,y0,z1],[x0,y1,z1],[x0,y1,z0],[x0,y0,z0]] },
+    { step: [0, 1, 0], points: (x0: number, x1: number, _y0: number, y1: number, z0: number, z1: number) => [[x0,y1,z0],[x0,y1,z1],[x1,y1,z1],[x1,y1,z0]] },
+    { step: [0, -1, 0], points: (x0: number, x1: number, y0: number, _y1: number, z0: number, z1: number) => [[x0,y0,z1],[x0,y0,z0],[x1,y0,z0],[x1,y0,z1]] },
+    { step: [0, 0, 1], points: (x0: number, x1: number, y0: number, y1: number, _z0: number, z1: number) => [[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]] },
+    { step: [0, 0, -1], points: (x0: number, x1: number, y0: number, y1: number, z0: number, _z1: number) => [[x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0]] },
+  ]
+  for (let j = 0; j < ny; j += 1) for (let k = 0; k < nz; k += 1) for (let i = 0; i < nx; i += 1) {
+    if (occupancy[cellIndex(i, j, k)]) continue
+    const x0 = outerMinX + i * dx, x1 = x0 + dx
+    const y0 = outerMinY + j * dy, y1 = y0 + dy
+    const z0 = outerMinZ + k * dz, z1 = z0 + dz
+    for (const face of faces) {
+      const ni = i + face.step[0], nj = j + face.step[1], nk = k + face.step[2]
+      const outside = ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz
+      if (!outside && !occupancy[cellIndex(ni, nj, nk)]) continue
+      const quad = face.points(x0, x1, y0, y1, z0, z1)
+      const a = quad[0], b = quad[1], c = quad[2], d = quad[3]
+      positions.push(...a, ...b, ...c, ...a, ...c, ...d)
+    }
+  }
+  const difference = new THREE.BufferGeometry()
+  difference.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  difference.computeVertexNormals()
+  return difference
+}
+
 function hasPreviousLayerSupport(data: TriangleData, x: number, y: number, z: number, layerHeight: number, supportRadius: number) {
   const targetY = y - layerHeight
   if (targetY < data.minY - layerHeight || targetY > data.maxY + layerHeight) return false
@@ -165,7 +225,6 @@ export function findUnsupportedOverhangs(
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
   const edge1 = new THREE.Vector3(), edge2 = new THREE.Vector3(), faceNormal = new THREE.Vector3()
   const highlightPositions: number[] = []
-  const supportColumns = new Map<string, { x: number; z: number; top: number }>()
   let flaggedTriangles = 0
   let flaggedArea = 0
   const triangleCount = Math.floor(count / 3)
@@ -201,12 +260,6 @@ export function findUnsupportedOverhangs(
     })
     if (!unsupportedSamples.length) continue
 
-    for (const [x, y, z] of unsupportedSamples) {
-      const cell = 2.5
-      const key = `${Math.round(x / cell)},${Math.round(z / cell)}`
-      const previous = supportColumns.get(key)
-      if (!previous || y > previous.top) supportColumns.set(key, { x, z, top: y })
-    }
     flaggedTriangles += 1
     flaggedArea += data.areas[triangle]
     highlightPositions.push(
@@ -220,28 +273,6 @@ export function findUnsupportedOverhangs(
   highlights.setAttribute('position', new THREE.Float32BufferAttribute(highlightPositions, 3))
   highlights.computeVertexNormals()
 
-  const supportPositions: number[] = []
-  const addQuad = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, d: THREE.Vector3) => {
-    supportPositions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, a.x, a.y, a.z, c.x, c.y, c.z, d.x, d.y, d.z)
-  }
-  const halfWidth = 0.6
-  for (const column of supportColumns.values()) {
-    if (column.top <= 0) continue
-    const x0 = column.x - halfWidth, x1 = column.x + halfWidth
-    const z0 = column.z - halfWidth, z1 = column.z + halfWidth
-    const y0 = 0, y1 = column.top
-    const p000 = new THREE.Vector3(x0, y0, z0), p100 = new THREE.Vector3(x1, y0, z0)
-    const p110 = new THREE.Vector3(x1, y0, z1), p010 = new THREE.Vector3(x0, y0, z1)
-    const p001 = new THREE.Vector3(x0, y1, z0), p101 = new THREE.Vector3(x1, y1, z0)
-    const p111 = new THREE.Vector3(x1, y1, z1), p011 = new THREE.Vector3(x0, y1, z1)
-    addQuad(p000, p100, p101, p001)
-    addQuad(p100, p110, p111, p101)
-    addQuad(p110, p010, p011, p111)
-    addQuad(p010, p000, p001, p011)
-    addQuad(p001, p101, p111, p011)
-  }
-  const supports = new THREE.BufferGeometry()
-  supports.setAttribute('position', new THREE.Float32BufferAttribute(supportPositions, 3))
-  supports.computeVertexNormals()
+  const supports = buildBoundingBoxDifference(data)
   return { highlights, triangleCount, flaggedTriangles, flaggedArea, limitDegrees, supports }
 }

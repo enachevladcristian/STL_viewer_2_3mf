@@ -556,7 +556,7 @@ function Viewport({
     if (supportOverlay?.getAttribute('position')?.count) {
       const supportMesh = new THREE.Mesh(
         supportOverlay,
-        new THREE.MeshBasicMaterial({ color: '#50ad91', side: THREE.DoubleSide, transparent: true, opacity: 0.6, depthTest: true, depthWrite: false }),
+        new THREE.MeshBasicMaterial({ color: '#50ad91', side: THREE.DoubleSide, transparent: true, opacity: 0.16, depthTest: true, depthWrite: false }),
       )
       supportMesh.name = 'printability-support-columns'
       supportMesh.renderOrder = 1
@@ -1208,14 +1208,16 @@ function App() {
             <div className="rotate-menu-header"><div><Scan size={16}/><strong>Printability check</strong></div><button title="Close printability panel" aria-label="Close printability panel" onClick={() => setCheckPanelOpen(false)}><X size={15}/></button></div>
             <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
             {!analysisResult ? <>
-              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Steep downward faces over 45° are conservatively flagged for support; shallower surfaces use the 45° lateral reach.</p>
+              <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. The green preview shows an expanded bounding volume with the model subtracted.</p>
               <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? 'Checking geometry…' : 'Run check'}</button>
             </> : <>
               <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
                 <strong>{analysisResult.flaggedTriangles ? 'Potential supports needed' : 'No unsupported surfaces found'}</strong>
                 <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} triangles are flagged for support</span>
               </div>
-              {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported <i className="support-legend-swatch"/> Green: mock supports</div>}
+              {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
+              <div className="analysis-legend"><i className="support-legend-swatch"/> Green: padded box − model (voxelized preview)</div>
+              <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
               <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
               <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? 'Checking geometry…' : 'Run again'}</button>
             </>}
