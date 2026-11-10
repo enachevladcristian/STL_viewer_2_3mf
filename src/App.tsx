@@ -1143,11 +1143,6 @@ function App() {
   }
 
   return <div className="app-shell" onDragOver={event => { event.preventDefault(); setIsDragging(true) }} onDragLeave={event => { if (event.target === event.currentTarget) setIsDragging(false) }} onDrop={onDrop}>
-    <header className="topbar">
-      <div className="topbar-actions"><button className="upload-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={16}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button></div>
-      <input ref={inputRef} type="file" accept=".stl,.3mf,model/stl,application/vnd.ms-package.3dmanufacturing-3dmodel+xml" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
-    </header>
-
     <main className="workspace">
       <section className="canvas-panel">
         <div className="canvas-header">
@@ -1262,7 +1257,8 @@ function App() {
         </div>
       </aside>
     </main>
-    <div className="mobile-upload" onClick={chooseFile}><Upload size={16}/> Open STL</div>
+    <input ref={inputRef} type="file" accept=".stl,.3mf,model/stl,application/vnd.ms-package.3dmanufacturing-3dmodel+xml" hidden onChange={event => { loadFile(event.target.files?.[0]); event.currentTarget.value = '' }}/>
+    <button className="upload-button bottom-open-button" onClick={chooseFile} disabled={isProcessing} title="Open an STL or 3MF model" aria-label="Open STL or 3MF model"><Upload size={18}/><span>{isProcessing ? 'Processing model…' : 'Open STL'}</span></button>
   </div>
 }
 
