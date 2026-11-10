@@ -8,7 +8,7 @@ A browser-based STL viewer for quickly opening and inspecting 3D models. Files a
 - Read common embedded slicer settings from 3MF metadata/configuration files alongside the imported mesh
 - 3MF parsing and settings extraction run locally in a background worker; exporting an imported 3MF produces an STL mesh
 - Parse, center, and calculate mesh statistics in background workers to keep the UI responsive on dense STL files
-- Run the layer-support check in a background worker; large geometry is not duplicated for viewport rendering
+- Run the layer-support check in a background worker; meshes above 100,000 triangles are welded and simplified to an analysis-only proxy while the full-resolution model remains unchanged
 - Rename the project and download the original STL data using that name as the `.stl` filename
 - Interactive 3D preview with orbit, zoom, and reset/fit camera controls
 - Toggle a measured bounding box with colored X/Y/Z dimension callouts around the model

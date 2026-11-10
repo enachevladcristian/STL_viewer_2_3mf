@@ -22,6 +22,10 @@ type ModelInfo = {
 }
 
 type CheckWorkerResponse = {
+  stage?: string
+  originalTriangleCount?: number
+  simplified?: boolean
+  simplificationError?: number
   triangleCount?: number
   flaggedTriangles?: number
   flaggedArea?: number
@@ -719,6 +723,7 @@ function App() {
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isChecking, setIsChecking] = useState(false)
+  const [checkStatus, setCheckStatus] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -731,6 +736,7 @@ function App() {
     checkWorkerRef.current?.terminate()
     checkWorkerRef.current = null
     setIsChecking(false)
+    setCheckStatus('')
   }, [])
 
   useEffect(() => () => {
@@ -959,6 +965,7 @@ function App() {
     }
     checkWorkerRef.current = worker
     setIsChecking(true)
+    setCheckStatus('Preparing analysis…')
     let positions: Float32Array
     let boundsTuple: [number, number, number, number, number, number]
     try {
@@ -970,15 +977,21 @@ function App() {
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
+      setCheckStatus('')
       setError('Not enough memory to prepare this model for the printability check.')
       return
     }
     worker.onmessage = event => {
       if (checkWorkerRef.current !== worker) return
+      const result = event.data as CheckWorkerResponse
+      if (result.stage) {
+        setCheckStatus(result.stage)
+        return
+      }
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
-      const result = event.data as CheckWorkerResponse
+      setCheckStatus('')
       if (result.error || !result.highlightPositions || !result.highlightNormals || !result.supportPositions || !result.supportNormals) {
         setError(result.error || 'The printability check could not process this model.')
         return
@@ -991,6 +1004,9 @@ function App() {
       supports.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(result.supportNormals), 3))
       setAnalysisResult({
         triangleCount: result.triangleCount ?? model.triangles,
+        originalTriangleCount: result.originalTriangleCount ?? model.triangles,
+        simplified: result.simplified ?? false,
+        simplificationError: result.simplificationError,
         flaggedTriangles: result.flaggedTriangles ?? 0,
         flaggedArea: result.flaggedArea ?? 0,
         limitDegrees: result.limitDegrees ?? 45,
@@ -1003,6 +1019,7 @@ function App() {
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
+      setCheckStatus('')
       setError('The printability worker stopped unexpectedly. Try checking a smaller or repaired STL.')
     }
     try {
@@ -1011,6 +1028,7 @@ function App() {
       checkWorkerRef.current = null
       worker.terminate()
       setIsChecking(false)
+      setCheckStatus('')
       setError('Not enough memory to run the printability check on this model.')
     }
   }
@@ -1204,17 +1222,18 @@ function App() {
             <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
             {!analysisResult ? <>
               <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Green shows only the box-minus-model volume that rises from the bed to the model.</p>
-              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? 'Checking geometry…' : 'Run check'}</button>
+              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run check'}</button>
             </> : <>
               <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
                 <strong>{analysisResult.flaggedTriangles ? 'Potential supports needed' : 'No unsupported surfaces found'}</strong>
-                <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} triangles are flagged for support</span>
+                <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} analyzed triangles are flagged for support</span>
+                {analysisResult.simplified && <span className="analysis-approx-note">Quick approximate analysis: simplified from {analysisResult.originalTriangleCount?.toLocaleString()} triangles. The displayed model and export are unchanged.</span>}
               </div>
               {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
               <div className="analysis-legend"><i className="support-legend-swatch"/> Green: bed-to-model difference (voxelized)</div>
               <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
               <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
-              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? 'Checking geometry…' : 'Run again'}</button>
+              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run again'}</button>
             </>}
             <div className="analysis-divider"/>
             <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>

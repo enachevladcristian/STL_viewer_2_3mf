@@ -7,6 +7,9 @@ export type OverhangCheck = {
   flaggedArea: number
   limitDegrees: number
   supports: THREE.BufferGeometry
+  originalTriangleCount?: number
+  simplified?: boolean
+  simplificationError?: number
 }
 
 type TriangleData = {
