@@ -661,7 +661,7 @@ function Viewport({
 
 function App() {
   const [model, setModel] = useState<ModelInfo | null>(null)
-  const [inspectorTab, setInspectorTab] = useState<'model' | 'starred' | 'support'>('model')
+  const [inspectorTab, setInspectorTab] = useState<'model' | 'starred'>('model')
   const [suggestedMaterial, setSuggestedMaterial] = useState<'PLA' | 'PETG'>('PLA')
   const [projectName, setProjectName] = useState('Untitled project')
   const [rotation, setRotation] = useState<Rotation>([0, 0, 0])
@@ -1225,7 +1225,6 @@ function App() {
         <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
           <button type="button" role="tab" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}>Model</button>
           <button type="button" role="tab" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}>Suggestions</button>
-          <button type="button" role="tab" aria-selected={inspectorTab === 'support'} className={inspectorTab === 'support' ? 'active' : ''} onClick={() => setInspectorTab('support')}>Support</button>
         </div>
         <div className="inspector-content" role="tabpanel">
           {inspectorTab === 'model' ? <>
@@ -1250,7 +1249,7 @@ function App() {
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
-          </> : inspectorTab === 'starred' ? <div className="suggestions-panel"><strong>Recomandari pentru Ultimaker S5</strong><select aria-label="Filament material" value={suggestedMaterial} onChange={event => setSuggestedMaterial(event.currentTarget.value as 'PLA' | 'PETG')}><option value="PLA">PLA</option><option value="PETG">PETG</option></select>{suggestedMaterial === 'PLA' && <table className="suggestions-table" aria-label="PLA printing settings"><tbody><tr><th scope="row">Printing temperature</th><td>215 C</td></tr><tr><th scope="row">Bed temperature</th><td>70 C</td></tr><tr><th scope="row">Brim</th><td>Yes</td></tr><tr><th scope="row">Brim width</th><td>3 - 7 mm</td></tr><tr><th scope="row">Brim only on outside</th><td>Yes</td></tr></tbody></table>}</div> : <div className="support-suggestion"><span>{analysisResult && analysisResult.flaggedTriangles > 0 ? 'Check printer support' : 'Analizati modelul pentru a vedea daca este nevoie de suporti'}</span></div>}
+          </> : <div className="suggestions-panel"><strong>Recomandari pentru Ultimaker S5</strong><select aria-label="Filament material" value={suggestedMaterial} onChange={event => setSuggestedMaterial(event.currentTarget.value as 'PLA' | 'PETG')}><option value="PLA">PLA</option><option value="PETG">PETG</option></select>{suggestedMaterial === 'PLA' && <table className="suggestions-table" aria-label="PLA printing settings"><tbody><tr><th scope="row">Printing temperature</th><td>215 C</td></tr><tr><th scope="row">Bed temperature</th><td>70 C</td></tr><tr><th scope="row">Brim</th><td>Yes</td></tr><tr><th scope="row">Brim width</th><td>3 - 7 mm</td></tr><tr><th scope="row">Brim only on outside</th><td>Yes</td></tr></tbody></table>}<div className="support-suggestion"><span>{analysisResult && analysisResult.flaggedTriangles > 0 ? 'Check printer support' : 'Analizati modelul pentru a vedea daca este nevoie de suporti'}</span></div></div>}
         </div>
       </aside>
     </main>
