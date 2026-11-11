@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Check, ChevronDown, CloudUpload, FileBox, FileUp, Grid2X2, Info, Move,
-  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Settings2,
+  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
 import * as THREE from 'three'
@@ -28,6 +28,7 @@ type CheckWorkerResponse = {
   triangleCount?: number
   flaggedTriangles?: number
   flaggedArea?: number
+  thinWallTriangles?: number
   limitDegrees?: number
   highlightPositions?: ArrayBuffer
   highlightNormals?: ArrayBuffer
@@ -661,6 +662,8 @@ function Viewport({
 
 function App() {
   const [model, setModel] = useState<ModelInfo | null>(null)
+  const [inspectorTab, setInspectorTab] = useState<'model' | 'starred'>('model')
+  const [suggestedMaterial, setSuggestedMaterial] = useState<'PLA' | 'PETG'>('PLA')
   const [projectName, setProjectName] = useState('Untitled project')
   const [rotation, setRotation] = useState<Rotation>([0, 0, 0])
   const rotationStateRef = useRef<Rotation>(rotation)
@@ -688,6 +691,9 @@ function App() {
   const [placeOnBedMode, setPlaceOnBedMode] = useState(false)
   const [checkPanelOpen, setCheckPanelOpen] = useState(false)
   const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
+  useEffect(() => {
+    if (!analysisResult && inspectorTab === 'starred') setInspectorTab('model')
+  }, [analysisResult, inspectorTab])
   const [showGrid, setShowGrid] = useState(true)
   const [showDimensions, setShowDimensions] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
@@ -978,6 +984,7 @@ function App() {
         simplificationError: result.simplificationError,
         flaggedTriangles: result.flaggedTriangles ?? 0,
         flaggedArea: result.flaggedArea ?? 0,
+        thinWallTriangles: result.thinWallTriangles ?? 0,
         limitDegrees: result.limitDegrees ?? 45,
         highlights,
         supports,
@@ -1172,6 +1179,7 @@ function App() {
                 <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} analyzed triangles are flagged for support</span>
                 {analysisResult.simplified && <span className="analysis-approx-note">Quick approximate analysis: simplified from {analysisResult.originalTriangleCount?.toLocaleString()} triangles. The displayed model and export are unchanged.</span>}
               </div>
+              {analysisResult.thinWallTriangles > 0 && <div className="thin-wall-warning"><strong>Thin walls detected</strong><span>Some walls are under 2 mm and may be too thin to print reliably.</span></div>}
               {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
               <div className="analysis-legend"><i className="support-legend-swatch"/> Green: bed-to-model difference (voxelized)</div>
               <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
@@ -1179,12 +1187,12 @@ function App() {
               <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run again'}</button>
             </>}
             <div className="analysis-divider"/>
-            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>
+            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Thin walls under 2 mm are flagged as a warning. Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum feature size, and pins (3 mm) still need manual review.</p></div>
             {analysisResult && <button className="clear-analysis-button" title="Remove check highlights and preview" onClick={() => { cancelCheck(); setAnalysisResult(null) }}><X size={14}/> Clear highlights</button>}
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
-            <div className="welcome-art"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="art-cube"><div className="cube-top"/><div className="cube-left"/><div className="cube-right"/></div><span className="art-spark spark-a">✳</span><span className="art-spark spark-b">✦</span></div>
+            <div className="welcome-art"><img className="printer-illustration" src="/images/printer-illustration.png" alt="Detailed line drawing of a 3D printer"/></div>
             <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL or 3MF to explore the mesh, inspect dimensions, and read print settings embedded in a 3MF.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose a model file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
           </div>}
           {model && <div className="canvas-hint"><MousePointer2 size={13}/><span>{placeOnBedMode ? 'Click a broad, flat face' : axisDragMode === 'move' ? 'Drag a colored axis to move' : axisDragMode === 'scale' ? 'Drag a colored axis to scale' : rotateMode ? 'Drag the model to rotate' : rotateMenuOpen ? 'Drag a colored axis to rotate' : movePanelOpen || scalePanelOpen ? 'Drag a colored axis or edit values' : 'Drag to orbit'}</span><i/><span>{placeOnBedMode ? 'Selected face will rest on the bed' : axisDragMode ? 'Menu returns when you release' : rotateMode ? 'Turn off Free rotate in menu' : rotateMenuOpen ? 'Or use 45° controls' : movePanelOpen || scalePanelOpen ? 'Select an axis handle' : 'Scroll to zoom'}</span></div>}
@@ -1197,8 +1205,13 @@ function App() {
       </section>
 
       <aside className="inspector">
-        <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div><button className="icon-button settings-button" title="Inspector settings"><Settings2 size={17}/></button></div>
-        <div className="inspector-content">
+        <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div></div>
+        <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
+          <button type="button" role="tab" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}>Model</button>
+          {analysisResult && <button type="button" role="tab" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}>Suggestions</button>}
+        </div>
+        <div className="inspector-content" role="tabpanel">
+          {inspectorTab === 'model' || !analysisResult ? <>
           <div className="section-label">MODEL</div>
           {model ? <>
             <div className="model-card"><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)}</span></div><button className="more-button" title="Remove model" aria-label="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
@@ -1220,6 +1233,7 @@ function App() {
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
+          </> : <div className="suggestions-panel"><strong>Recomandari pentru Ultimaker S5</strong><select aria-label="Filament material" value={suggestedMaterial} onChange={event => setSuggestedMaterial(event.currentTarget.value as 'PLA' | 'PETG')}><option value="PLA">PLA</option><option value="PETG">PETG</option></select>{suggestedMaterial === 'PLA' && <table className="suggestions-table" aria-label="PLA printing settings"><tbody><tr><th scope="row">Printing temperature</th><td>215 C</td></tr><tr><th scope="row">Bed temperature</th><td>70 C</td></tr><tr><th scope="row">Brim</th><td>Yes</td></tr><tr><th scope="row">Brim width</th><td>3 - 7 mm</td></tr><tr><th scope="row">Brim only on outside</th><td>Yes</td></tr></tbody></table>}<div className="support-suggestion"><strong>Support:</strong><span>{analysisResult && analysisResult.flaggedTriangles > 0 ? 'Check printer support' : 'Analizati modelul pentru a vedea daca este nevoie de suporti'}</span></div></div>}
         </div>
       </aside>
     </main>
