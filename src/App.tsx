@@ -1226,7 +1226,7 @@ function App() {
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
-          </> : <div className="inspector-starred-empty"><Star size={19}/><strong>Starred</strong><span>Starred items will appear here.</span></div>}
+          </> : <div className="inspector-starred-empty"><Star size={19}/><strong>Recommended 3D printing settings</strong></div>}
         </div>
       </aside>
     </main>
