@@ -1192,29 +1192,7 @@ function App() {
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
-            <div className="welcome-art" role="img" aria-label="A simplified 3D printer illustration"><svg className="printer-illustration" viewBox="0 0 160 160" aria-hidden="true">
-              <g stroke="none">
-                <path d="M50 32 58 25h60l-8 7z" fill="#f5f6f8"/>
-                <path d="M50 32h60v13H50z" fill="#d9dde2"/>
-                <path d="M43 39q0-7 7-7v94h-7z" fill="#c6cbd2"/>
-                <path d="M110 32h7v94h-7z" fill="#c3c8cf"/>
-                <path d="M117 39 126 32v87l-9 7z" fill="#aab1ba"/>
-                <path d="M70 45 78 38h20l-8 7z" fill="#f5f6f8"/>
-                <path d="M70 45h20v17H70z" fill="#dce1e7"/>
-                <path d="M90 45 98 38v17l-8 7z" fill="#aeb7c3"/>
-                <path d="M80 62v12l-4 7h8l-4-7z" fill="#747f8e"/>
-                <path d="m80 91 20 10-20 10-20-10z" fill="#f4f6f9"/>
-                <path d="M60 101v17l20 10v-17z" fill="#c4cedb"/>
-                <path d="M80 111v17l20-10v-17z" fill="#9daaba"/>
-                <path d="M53 128 80 142l27-14-7-3-20 10-20-10z" fill="#d3d8df"/>
-              </g>
-              <g fill="none" stroke="#59616b" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M43 126V39q0-7 7-7h60q7 0 7 7v87M50 45h60M50 45l8-7h60M110 45l8-7M58 25h60l8 7v87l-9 7M50 32V126M110 32v94M57 126h46"/>
-                <path d="M70 45h20l8-7v17l-8 7H70zM90 45v17M80 62v12l-4 7h8l-4-7"/>
-                <path d="m80 91 20 10-20 10-20-10zM60 101v17l20 10 20-10v-17M80 111v17"/>
-                <path d="M53 128 80 142l27-14M58 132v5M102 132v5"/>
-              </g>
-            </svg></div>
+            <div className="welcome-art"><img className="printer-illustration" src="/images/printer-illustration.png" alt="Detailed line drawing of a 3D printer"/></div>
             <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL or 3MF to explore the mesh, inspect dimensions, and read print settings embedded in a 3MF.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose a model file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
           </div>}
           {model && <div className="canvas-hint"><MousePointer2 size={13}/><span>{placeOnBedMode ? 'Click a broad, flat face' : axisDragMode === 'move' ? 'Drag a colored axis to move' : axisDragMode === 'scale' ? 'Drag a colored axis to scale' : rotateMode ? 'Drag the model to rotate' : rotateMenuOpen ? 'Drag a colored axis to rotate' : movePanelOpen || scalePanelOpen ? 'Drag a colored axis or edit values' : 'Drag to orbit'}</span><i/><span>{placeOnBedMode ? 'Selected face will rest on the bed' : axisDragMode ? 'Menu returns when you release' : rotateMode ? 'Turn off Free rotate in menu' : rotateMenuOpen ? 'Or use 45° controls' : movePanelOpen || scalePanelOpen ? 'Select an axis handle' : 'Scroll to zoom'}</span></div>}
