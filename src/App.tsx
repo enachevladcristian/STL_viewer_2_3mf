@@ -1186,15 +1186,25 @@ function App() {
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
             <div className="welcome-art" role="img" aria-label="A simplified 3D printer illustration"><svg className="printer-illustration" viewBox="0 0 160 160" aria-hidden="true">
-              <g fill="none" stroke="#111111" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M43 126V39c0-4 3-7 7-7h60c4 0 7 3 7 7v87"/>
-                <path d="M50 32 58 25h60l8 7v87l-9 7M117 39l9-7M117 126l9-7M58 25v7M118 25v7"/>
-                <path d="M50 45h60M50 45l8-7h60M110 45l8-7M57 126h46M50 130h60"/>
-                <path d="M70 45h20v17H70zM90 45l8-7v17l-8 7M80 62v12"/>
-                <path d="m80 74-4 7h8z"/>
-                <path d="m80 91 20 10-20 10-20-10zM60 101v17l20 10 20-10v-17M80 111v17"/>
-                <path d="M53 128 80 142l27-14M58 132v5M102 132v5"/>
-                <circle cx="50" cy="39" r="1.5"/><circle cx="110" cy="39" r="1.5"/>
+              <g stroke="#606975" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M50 32 58 25h60l8 7v87l-9 7V39q0-7-7-7z" fill="#c6cbd2"/>
+                <path d="M50 32h60v13H50z" fill="#e2e5e9"/>
+                <path d="M43 39q0-7 7-7v94h-7z" fill="#cbd0d6"/>
+                <path d="M107 32h10v94h-10z" fill="#d8dce1"/>
+                <path d="M50 32 58 25h60l-8 7z" fill="#f2f3f5"/>
+                <path d="M70 45h20v17H70z" fill="#e7ebf0"/>
+                <path d="M90 45 98 38v17l-8 7z" fill="#afb7c2"/>
+                <path d="M70 45 78 38h20l-8 7z" fill="#f6f7f8"/>
+                <path d="M80 62v12l-4 7h8l-4-7" fill="#909aa7"/>
+                <path d="m80 91 20 10-20 10-20-10z" fill="#f0f3f7"/>
+                <path d="M60 101v17l20 10v-17z" fill="#c1cad7"/>
+                <path d="M80 111v17l20-10v-17z" fill="#9eabba"/>
+                <path d="M53 128 80 142l27-14-7-3-20 10-20-10z" fill="#d5d9df"/>
+                <path d="M43 126V39q0-7 7-7h60q7 0 7 7v87M50 45h60M50 45l8-7h60M110 45l8-7M57 126h46M50 130h60" fill="none"/>
+                <path d="M70 45h20v17H70zM90 45l8-7v17l-8 7" fill="none"/>
+                <path d="m80 91 20 10-20 10-20-10zM60 101v17l20 10 20-10v-17M80 111v17" fill="none"/>
+                <path d="M53 128 80 142l27-14M58 132v5M102 132v5" fill="none"/>
+                <circle cx="50" cy="39" r="1.5" fill="#606975"/><circle cx="110" cy="39" r="1.5" fill="#606975"/>
               </g>
             </svg></div>
             <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL or 3MF to explore the mesh, inspect dimensions, and read print settings embedded in a 3MF.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose a model file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
