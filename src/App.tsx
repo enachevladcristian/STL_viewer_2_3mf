@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Check, ChevronDown, CloudUpload, FileBox, FileUp, Grid2X2, Info, Move,
-  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Settings2,
+  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Star,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
 import * as THREE from 'three'
@@ -661,6 +661,7 @@ function Viewport({
 
 function App() {
   const [model, setModel] = useState<ModelInfo | null>(null)
+  const [inspectorTab, setInspectorTab] = useState<'model' | 'starred'>('model')
   const [projectName, setProjectName] = useState('Untitled project')
   const [rotation, setRotation] = useState<Rotation>([0, 0, 0])
   const rotationStateRef = useRef<Rotation>(rotation)
@@ -1197,8 +1198,13 @@ function App() {
       </section>
 
       <aside className="inspector">
-        <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div><button className="icon-button settings-button" title="Inspector settings"><Settings2 size={17}/></button></div>
-        <div className="inspector-content">
+        <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div></div>
+        <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
+          <button type="button" role="tab" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}>Model</button>
+          <button type="button" role="tab" aria-label="Starred" title="Starred" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}><Star size={15}/></button>
+        </div>
+        <div className="inspector-content" role="tabpanel">
+          {inspectorTab === 'model' ? <>
           <div className="section-label">MODEL</div>
           {model ? <>
             <div className="model-card"><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)}</span></div><button className="more-button" title="Remove model" aria-label="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
@@ -1220,6 +1226,7 @@ function App() {
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
+          </> : <div className="inspector-starred-empty"><Star size={19}/><strong>Starred</strong><span>Starred items will appear here.</span></div>}
         </div>
       </aside>
     </main>
