@@ -1223,7 +1223,7 @@ function App() {
         <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div></div>
         <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
           <button type="button" role="tab" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}>Model</button>
-          <button type="button" role="tab" aria-label="Starred" title="Starred" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}><Star size={15}/></button>
+          <button type="button" role="tab" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}>Recommended Printer settings</button>
         </div>
         <div className="inspector-content" role="tabpanel">
           {inspectorTab === 'model' ? <>
