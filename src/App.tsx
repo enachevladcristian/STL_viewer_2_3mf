@@ -1249,7 +1249,7 @@ function App() {
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
-          </> : <div className="suggestions-panel"><strong>Recomandari pentru Ultimaker S5</strong><select aria-label="Filament material" value={suggestedMaterial} onChange={event => setSuggestedMaterial(event.currentTarget.value as 'PLA' | 'PETG')}><option value="PLA">PLA</option><option value="PETG">PETG</option></select>{suggestedMaterial === 'PLA' && <table className="suggestions-table" aria-label="PLA printing settings"><tbody><tr><th scope="row">Printing temperature</th><td>215 C</td></tr><tr><th scope="row">Bed temperature</th><td>70 C</td></tr></tbody></table>}</div>}
+          </> : <div className="suggestions-panel"><strong>Recomandari pentru Ultimaker S5</strong><select aria-label="Filament material" value={suggestedMaterial} onChange={event => setSuggestedMaterial(event.currentTarget.value as 'PLA' | 'PETG')}><option value="PLA">PLA</option><option value="PETG">PETG</option></select>{suggestedMaterial === 'PLA' && <table className="suggestions-table" aria-label="PLA printing settings"><tbody><tr><th scope="row">Printing temperature</th><td>215 C</td></tr><tr><th scope="row">Bed temperature</th><td>70 C</td></tr><tr><th scope="row">Brim</th><td>Yes</td></tr><tr><th scope="row">Brim width</th><td>3 - 7 mm</td></tr><tr><th scope="row">Brim only on outside</th><td>Yes</td></tr></tbody></table>}</div>}
         </div>
       </aside>
     </main>
