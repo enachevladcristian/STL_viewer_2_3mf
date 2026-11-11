@@ -691,6 +691,9 @@ function App() {
   const [placeOnBedMode, setPlaceOnBedMode] = useState(false)
   const [checkPanelOpen, setCheckPanelOpen] = useState(false)
   const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
+  useEffect(() => {
+    if (!analysisResult && inspectorTab === 'starred') setInspectorTab('model')
+  }, [analysisResult, inspectorTab])
   const [showGrid, setShowGrid] = useState(true)
   const [showDimensions, setShowDimensions] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
@@ -1227,10 +1230,10 @@ function App() {
         <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div></div>
         <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
           <button type="button" role="tab" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}>Model</button>
-          <button type="button" role="tab" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}>Suggestions</button>
+          {analysisResult && <button type="button" role="tab" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}>Suggestions</button>}
         </div>
         <div className="inspector-content" role="tabpanel">
-          {inspectorTab === 'model' ? <>
+          {inspectorTab === 'model' || !analysisResult ? <>
           <div className="section-label">MODEL</div>
           {model ? <>
             <div className="model-card"><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)}</span></div><button className="more-button" title="Remove model" aria-label="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
