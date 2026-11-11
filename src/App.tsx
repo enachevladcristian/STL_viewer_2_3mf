@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Check, ChevronDown, CloudUpload, FileBox, FileUp, Grid2X2, Info, Move,
-  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan, Star,
+  Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
 import * as THREE from 'three'
@@ -1248,7 +1248,7 @@ function App() {
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
-          </> : <div className="inspector-starred-empty"><Star size={19}/><strong>Recommended 3D printing settings</strong></div>}
+          </> : <div className="suggestions-panel"><strong>Recomandari pentru Ultimaker S5</strong><select aria-label="Filament material" defaultValue="PLA"><option value="PLA">PLA</option><option value="PETG">PETG</option></select></div>}
         </div>
       </aside>
     </main>
