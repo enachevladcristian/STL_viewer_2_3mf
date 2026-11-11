@@ -1185,7 +1185,7 @@ function App() {
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
           {!model && !isDragging && <div className="welcome-card">
-            <div className="welcome-art" role="img" aria-label="A simplified 3D printer illustration"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><svg className="printer-illustration" viewBox="0 0 160 160" aria-hidden="true">
+            <div className="welcome-art" role="img" aria-label="A simplified 3D printer illustration"><svg className="printer-illustration" viewBox="0 0 160 160" aria-hidden="true">
               <path d="M39 121V37a7 7 0 0 1 7-7h68a7 7 0 0 1 7 7v84" fill="none" stroke="#8fa7c9" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round"/>
               <path d="M48 39h64" stroke="#8fa7c9" strokeWidth="4" strokeLinecap="round"/>
               <rect x="67" y="42" width="27" height="17" rx="4" fill="#c5d4eb" stroke="#8fa7c9" strokeWidth="2"/>
@@ -1196,7 +1196,7 @@ function App() {
               <path d="M80 124v8l29-13v-8z" fill="#cbd8eb" stroke="#8fa7c9" strokeWidth="2" strokeLinejoin="round"/>
               <path d="M47 121h66" stroke="#829bc0" strokeWidth="4" strokeLinecap="round"/>
               <circle cx="50" cy="39" r="3" fill="#a9bddb"/><circle cx="110" cy="39" r="3" fill="#a9bddb"/>
-            </svg><span className="art-spark spark-a">✳</span><span className="art-spark spark-b">✦</span></div>
+            </svg></div>
             <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL or 3MF to explore the mesh, inspect dimensions, and read print settings embedded in a 3MF.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose a model file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
           </div>}
           {model && <div className="canvas-hint"><MousePointer2 size={13}/><span>{placeOnBedMode ? 'Click a broad, flat face' : axisDragMode === 'move' ? 'Drag a colored axis to move' : axisDragMode === 'scale' ? 'Drag a colored axis to scale' : rotateMode ? 'Drag the model to rotate' : rotateMenuOpen ? 'Drag a colored axis to rotate' : movePanelOpen || scalePanelOpen ? 'Drag a colored axis or edit values' : 'Drag to orbit'}</span><i/><span>{placeOnBedMode ? 'Selected face will rest on the bed' : axisDragMode ? 'Menu returns when you release' : rotateMode ? 'Turn off Free rotate in menu' : rotateMenuOpen ? 'Or use 45° controls' : movePanelOpen || scalePanelOpen ? 'Select an axis handle' : 'Scroll to zoom'}</span></div>}
