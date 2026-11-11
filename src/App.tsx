@@ -28,6 +28,7 @@ type CheckWorkerResponse = {
   triangleCount?: number
   flaggedTriangles?: number
   flaggedArea?: number
+  thinWallTriangles?: number
   limitDegrees?: number
   highlightPositions?: ArrayBuffer
   highlightNormals?: ArrayBuffer
@@ -980,6 +981,7 @@ function App() {
         simplificationError: result.simplificationError,
         flaggedTriangles: result.flaggedTriangles ?? 0,
         flaggedArea: result.flaggedArea ?? 0,
+        thinWallTriangles: result.thinWallTriangles ?? 0,
         limitDegrees: result.limitDegrees ?? 45,
         highlights,
         supports,
@@ -1174,6 +1176,7 @@ function App() {
                 <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} analyzed triangles are flagged for support</span>
                 {analysisResult.simplified && <span className="analysis-approx-note">Quick approximate analysis: simplified from {analysisResult.originalTriangleCount?.toLocaleString()} triangles. The displayed model and export are unchanged.</span>}
               </div>
+              {analysisResult.thinWallTriangles > 0 && <div className="thin-wall-warning"><strong>Thin walls detected</strong><span>Some walls are under 2 mm and may be too thin to print reliably.</span></div>}
               {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
               <div className="analysis-legend"><i className="support-legend-swatch"/> Green: bed-to-model difference (voxelized)</div>
               <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
@@ -1181,7 +1184,7 @@ function App() {
               <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run again'}</button>
             </>}
             <div className="analysis-divider"/>
-            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum features (2 mm), and pins (3 mm) still need manual review. They are not counted as passing.</p></div>
+            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Thin walls under 2 mm are flagged as a warning. Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum feature size, and pins (3 mm) still need manual review.</p></div>
             {analysisResult && <button className="clear-analysis-button" title="Remove check highlights and preview" onClick={() => { cancelCheck(); setAnalysisResult(null) }}><X size={14}/> Clear highlights</button>}
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}

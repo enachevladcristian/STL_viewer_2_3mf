@@ -17,6 +17,7 @@ type CheckResponse = {
   simplificationError?: number
   flaggedTriangles: number
   flaggedArea: number
+  thinWallTriangles: number
   limitDegrees: number
   highlightPositions: ArrayBuffer
   highlightNormals: ArrayBuffer
@@ -151,6 +152,7 @@ workerScope.onmessage = async event => {
       simplificationError,
       flaggedTriangles: result.flaggedTriangles,
       flaggedArea: result.flaggedArea,
+      thinWallTriangles: result.thinWallTriangles,
       limitDegrees: result.limitDegrees,
       highlightPositions: highlightPositions.buffer,
       highlightNormals: highlightNormals.buffer,

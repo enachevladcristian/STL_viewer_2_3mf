@@ -5,6 +5,7 @@ export type OverhangCheck = {
   triangleCount: number
   flaggedTriangles: number
   flaggedArea: number
+  thinWallTriangles: number
   limitDegrees: number
   supports: THREE.BufferGeometry
   originalTriangleCount?: number
@@ -232,7 +233,86 @@ function hasPreviousLayerSupport(data: TriangleData, x: number, y: number, z: nu
   return offsets.some(([dx, dz]) => isInsideAt(data, x + dx, targetY, z + dz))
 }
 
-/** Marks surface triangles above the bed that have no material in the preceding layer beneath them. */
+const MIN_WALL_THICKNESS_MM = 2
+
+function getNormalBin(nx: number, ny: number, nz: number) {
+  const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz)
+  if (ax >= ay && ax >= az) return nx >= 0 ? 1 : 0
+  if (ay >= ax && ay >= az) return ny >= 0 ? 3 : 2
+  return nz >= 0 ? 5 : 4
+}
+
+/** Finds close, opposing surface facets that indicate a thin wall. */
+function countThinWallTriangles(data: TriangleData, threshold = MIN_WALL_THICKNESS_MM) {
+  const triangleCount = Math.floor(data.positions.length / 9)
+  const centers = new Float32Array(triangleCount * 3)
+  const normals = new Float32Array(triangleCount * 3)
+  const bins = new Map<string, number[]>()
+  const cellSize = threshold
+
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const offset = triangle * 9
+    const ax = data.positions[offset], ay = data.positions[offset + 1], az = data.positions[offset + 2]
+    const bx = data.positions[offset + 3], by = data.positions[offset + 4], bz = data.positions[offset + 5]
+    const cx = data.positions[offset + 6], cy = data.positions[offset + 7], cz = data.positions[offset + 8]
+    const ux = bx - ax, uy = by - ay, uz = bz - az
+    const vx = cx - ax, vy = cy - ay, vz = cz - az
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx
+    const normalLength = Math.hypot(nx, ny, nz)
+    if (normalLength < 1e-10) continue
+    nx /= normalLength; ny /= normalLength; nz /= normalLength
+    const centerOffset = triangle * 3
+    const x = centers[centerOffset] = (ax + bx + cx) / 3
+    const y = centers[centerOffset + 1] = (ay + by + cy) / 3
+    const z = centers[centerOffset + 2] = (az + bz + cz) / 3
+    normals[centerOffset] = nx; normals[centerOffset + 1] = ny; normals[centerOffset + 2] = nz
+    const bin = getNormalBin(nx, ny, nz)
+    const key = `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)},${Math.floor(z / cellSize)},${bin}`
+    const entries = bins.get(key)
+    if (entries) entries.push(triangle)
+    else bins.set(key, [triangle])
+  }
+
+  const flagged = new Uint8Array(triangleCount)
+  let flaggedCount = 0
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const offset = triangle * 3
+    const nx = normals[offset], ny = normals[offset + 1], nz = normals[offset + 2]
+    if (!nx && !ny && !nz) continue
+    const x = centers[offset], y = centers[offset + 1], z = centers[offset + 2]
+    const cellX = Math.floor(x / cellSize), cellY = Math.floor(y / cellSize), cellZ = Math.floor(z / cellSize)
+    const oppositeBin = getNormalBin(nx, ny, nz) ^ 1
+    let foundOpposingSurface = false
+    for (let dxCell = -1; dxCell <= 1 && !foundOpposingSurface; dxCell += 1) {
+      for (let dyCell = -1; dyCell <= 1 && !foundOpposingSurface; dyCell += 1) {
+        for (let dzCell = -1; dzCell <= 1 && !foundOpposingSurface; dzCell += 1) {
+          const candidates = bins.get(`${cellX + dxCell},${cellY + dyCell},${cellZ + dzCell},${oppositeBin}`)
+          if (!candidates) continue
+          for (const candidate of candidates) {
+            if (candidate <= triangle) continue
+            const candidateOffset = candidate * 3
+            const qx = normals[candidateOffset], qy = normals[candidateOffset + 1], qz = normals[candidateOffset + 2]
+            if (nx * qx + ny * qy + nz * qz > -0.94) continue
+            const vx = centers[candidateOffset] - x
+            const vy = centers[candidateOffset + 1] - y
+            const vz = centers[candidateOffset + 2] - z
+            const thickness = Math.abs(vx * nx + vy * ny + vz * nz)
+            if (thickness < 0.05 || thickness >= threshold) continue
+            const tangentSq = vx * vx + vy * vy + vz * vz - thickness * thickness
+            if (tangentSq > 0.75 * 0.75) continue
+            if (!flagged[triangle]) { flagged[triangle] = 1; flaggedCount += 1 }
+            if (!flagged[candidate]) { flagged[candidate] = 1; flaggedCount += 1 }
+            foundOpposingSurface = true
+            break
+          }
+        }
+      }
+    }
+  }
+  return flaggedCount
+}
+
+/** Marks unsupported surfaces and reports opposing facets that form thin walls. */
 export function findUnsupportedOverhangs(
   geometry: THREE.BufferGeometry,
   rotationDegrees: [number, number, number],
@@ -306,5 +386,6 @@ export function findUnsupportedOverhangs(
   highlights.computeVertexNormals()
 
   const supports = buildBoundingBoxDifference(data)
-  return { highlights, triangleCount, flaggedTriangles, flaggedArea, limitDegrees, supports }
+  const thinWallTriangles = countThinWallTriangles(data)
+  return { highlights, triangleCount, flaggedTriangles, flaggedArea, thinWallTriangles, limitDegrees, supports }
 }
