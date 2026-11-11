@@ -1188,11 +1188,13 @@ function App() {
             <div className="welcome-art" role="img" aria-label="A simplified 3D printer illustration"><svg className="printer-illustration" viewBox="0 0 160 160" aria-hidden="true">
               <g fill="none" stroke="#111111" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M43 126V39c0-4 3-7 7-7h60c4 0 7 3 7 7v87"/>
-                <path d="M50 45h60M57 126h46"/>
-                <path d="M70 45h20v17H70zM80 62v12"/>
+                <path d="M50 32 58 25h60l8 7v87l-9 7M117 39l9-7M117 126l9-7M58 25v7M118 25v7"/>
+                <path d="M50 45h60M50 45l8-7h60M110 45l8-7M57 126h46M50 130h60"/>
+                <path d="M70 45h20v17H70zM90 45l8-7v17l-8 7M80 62v12"/>
                 <path d="m80 74-4 7h8z"/>
                 <path d="m80 91 20 10-20 10-20-10zM60 101v17l20 10 20-10v-17M80 111v17"/>
-                <path d="M50 130h60"/>
+                <path d="M53 128 80 142l27-14M58 132v5M102 132v5"/>
+                <circle cx="50" cy="39" r="1.5"/><circle cx="110" cy="39" r="1.5"/>
               </g>
             </svg></div>
             <div className="welcome-copy"><span className="eyebrow"><Sparkles size={12}/> YOUR 3D WORKSPACE</span><h1>Bring your model<br/>into <em>focus.</em></h1><p>Open an STL or 3MF to explore the mesh, inspect dimensions, and read print settings embedded in a 3MF.</p><button className="primary-cta" onClick={chooseFile}><FileUp size={17}/> Choose a model file <span>↗</span></button><div className="drop-hint"><span className="hint-line"/>or drag and drop it here<span className="hint-line"/></div></div>
