@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Box, Check, ChevronDown, CloudUpload, FileBox, FileUp, Grid2X2, Info, Move,
+  Box, Check, ChevronDown, ClipboardCheck, CloudUpload, FileBox, FileUp, Grid2X2, Info, Move,
   Maximize, MousePointer2, Pencil, Rotate3D, RotateCcw, Ruler, Scan,
   ShieldCheck, Sparkles, Triangle, Upload, X,
 } from 'lucide-react'
@@ -20,6 +20,55 @@ type ModelInfo = {
   geometry: THREE.BufferGeometry
 }
 
+type MeshIntegrityIssue = 'openEdges' | 'nonManifold' | 'invertedNormals' | 'degenerateFaces'
+type MeshIntegrityWorkerResponse = {
+  stage?: string
+  error?: string
+  counts?: { openEdges: number; nonManifoldEdges: number; invertedTriangles: number; degenerateTriangles: number }
+  triangleCounts?: { openEdges: number; nonManifold: number; invertedNormals: number; degenerateFaces: number }
+  highlights?: Record<MeshIntegrityIssue, ArrayBuffer>
+  sampledHighlights?: boolean
+}
+type MeshIntegrityResult = {
+  counts: NonNullable<MeshIntegrityWorkerResponse['counts']>
+  triangleCounts: NonNullable<MeshIntegrityWorkerResponse['triangleCounts']>
+  highlights: Record<MeshIntegrityIssue, THREE.BufferGeometry>
+  sampledHighlights: boolean
+}
+
+const INTEGRITY_ISSUE_COLORS: Record<MeshIntegrityIssue, string> = {
+  openEdges: '#ff9a3d',
+  nonManifold: '#e84855',
+  invertedNormals: '#a45be0',
+  degenerateFaces: '#f2bd3d',
+}
+
+type OrientationSuggestion = {
+  rotation: Rotation
+  unsupportedArea: number
+  unsupportedPercent: number
+  bedContactArea: number
+  minimumContactArea: number
+  dimensions: [number, number, number]
+  fits: boolean
+  overflow: number
+}
+type OrientationWorkerResponse = { stage?: string; error?: string; suggestions?: OrientationSuggestion[] }
+type LayerPreviewData = {
+  layerNumber: number
+  layerHeight: number
+  currentPositions: ArrayBuffer
+  islandPositions: ArrayBuffer
+  islandCount: number
+  triangleCount: number
+  originalTriangleCount: number
+  simplified: boolean
+}
+type LayerPreviewWorkerResponse = LayerPreviewData | { stage: string } | { error: string }
+type LayerScanWarning = { layerNumber: number; layerHeight: number; islandCount: number }
+type LayerScanData = { scanWarnings: LayerScanWarning[]; scannedLayers: number; triangleCount: number; originalTriangleCount: number; simplified: boolean }
+type LayerScanWorkerResponse = LayerScanData | { stage: string } | { error: string }
+
 type CheckWorkerResponse = {
   stage?: string
   originalTriangleCount?: number
@@ -29,6 +78,12 @@ type CheckWorkerResponse = {
   flaggedTriangles?: number
   flaggedArea?: number
   thinWallTriangles?: number
+  undersizedFeatureTriangles?: number
+  minimumWallThickness?: number
+  minimumFeatureWidth?: number
+  bedContactArea?: number
+  minimumContactArea?: number
+  floating?: boolean
   limitDegrees?: number
   highlightPositions?: ArrayBuffer
   highlightNormals?: ArrayBuffer
@@ -57,6 +112,29 @@ type Rotation = [number, number, number]
 type AxisValues = [number, number, number]
 type AxisTransformMode = 'move' | 'scale'
 type ViewPreset = 'X' | 'Y' | 'Z' | 'home'
+type FilamentMaterial = 'PLA' | 'PETG'
+type ProfileSetting = { label: string; value: string }
+
+const BUILD_VOLUME = { width: 330, depth: 240, height: 300 }
+
+const PROFILE_DEFAULTS: Record<FilamentMaterial, ProfileSetting[]> = {
+  PLA: [
+    { label: 'Profile', value: 'Speed' },
+    { label: 'Layer Height', value: '0.2 mm' },
+    { label: 'Infill', value: '20 %' },
+    { label: 'Material temperature', value: '215 C' },
+    { label: 'Bed Temperature', value: '70 C' },
+    { label: 'Build plate adhesion', value: 'Brim' },
+    { label: 'Brim Width', value: '4 mm' },
+  ],
+  PETG: [
+    { label: 'Profile', value: 'Speed' },
+    { label: 'Layer Height', value: '0.2 mm' },
+    { label: 'Infill', value: '20%' },
+    { label: 'Material', value: '255 C' },
+    { label: 'Build plate', value: '85 C' },
+  ],
+}
 
 function getFlatSupportNormal(geometry: THREE.BufferGeometry, normal: THREE.Vector3, point: THREE.Vector3, minimumArea: number) {
   const position = geometry.getAttribute('position')
@@ -116,13 +194,15 @@ function constrainToBuildPlate(geometry: THREE.BufferGeometry, rotation: Rotatio
     THREE.MathUtils.degToRad(rotation[2]),
   ))
   bounds.applyMatrix4(new THREE.Matrix4().compose(new THREE.Vector3(), orientation, new THREE.Vector3(...scale)))
-  const minX = -110 - bounds.min.x
-  const maxX = 110 - bounds.max.x
-  const minZ = -110 - bounds.min.z
-  const maxZ = 110 - bounds.max.z
+  const minX = -BUILD_VOLUME.width / 2 - bounds.min.x
+  const maxX = BUILD_VOLUME.width / 2 - bounds.max.x
+  const minZ = -BUILD_VOLUME.depth / 2 - bounds.min.z
+  const maxZ = BUILD_VOLUME.depth / 2 - bounds.max.z
   const x = minX <= maxX ? THREE.MathUtils.clamp(position[0], minX, maxX) : 0
   const z = minZ <= maxZ ? THREE.MathUtils.clamp(position[2], minZ, maxZ) : 0
-  return [x, position[1], z]
+  const height = bounds.max.y - bounds.min.y
+  const y = THREE.MathUtils.clamp(position[1], 0, Math.max(0, BUILD_VOLUME.height - height))
+  return [x, y, z]
 }
 const formatSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 const formatMeasure = (n: number) => `${n.toFixed(2)} mm`
@@ -144,6 +224,188 @@ function getStats(geometry: THREE.BufferGeometry, scaleFactors: AxisValues = [1,
     area += normal.crossVectors(edge1, edge2).length() / 2
   }
   return { volume: Math.abs(volume), area }
+}
+
+const MAX_CUBE_GRID_CELLS = 12_000
+
+type CubeGridLayout = { min: THREE.Vector3; counts: [number, number, number]; total: number }
+
+function getCubeGridLayout(bounds: THREE.Box3, cubeSize: number): CubeGridLayout | null {
+  if (!Number.isFinite(cubeSize) || cubeSize <= 0 || bounds.isEmpty()) return null
+  const size = bounds.getSize(new THREE.Vector3())
+  const counts: [number, number, number] = [
+    Math.max(1, Math.ceil((size.x - 1e-8) / cubeSize)),
+    Math.max(1, Math.ceil((size.y - 1e-8) / cubeSize)),
+    Math.max(1, Math.ceil((size.z - 1e-8) / cubeSize)),
+  ]
+  const expandedSize = new THREE.Vector3(counts[0] * cubeSize, counts[1] * cubeSize, counts[2] * cubeSize)
+  const min = bounds.getCenter(new THREE.Vector3()).sub(expandedSize.multiplyScalar(0.5))
+  return { min, counts, total: counts[0] * counts[1] * counts[2] }
+}
+
+function makeCubeGridGeometry(layout: CubeGridLayout, cubeSize: number) {
+  const [nx, ny, nz] = layout.counts
+  const { min } = layout
+  const points: number[] = []
+  const pushSegment = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) => {
+    points.push(x0, y0, z0, x1, y1, z1)
+  }
+
+  for (let iy = 0; iy <= ny; iy += 1) for (let iz = 0; iz <= nz; iz += 1) for (let ix = 0; ix < nx; ix += 1) {
+    const y = min.y + iy * cubeSize, z = min.z + iz * cubeSize, x = min.x + ix * cubeSize
+    pushSegment(x, y, z, x + cubeSize, y, z)
+  }
+  for (let ix = 0; ix <= nx; ix += 1) for (let iz = 0; iz <= nz; iz += 1) for (let iy = 0; iy < ny; iy += 1) {
+    const x = min.x + ix * cubeSize, z = min.z + iz * cubeSize, y = min.y + iy * cubeSize
+    pushSegment(x, y, z, x, y + cubeSize, z)
+  }
+  for (let ix = 0; ix <= nx; ix += 1) for (let iy = 0; iy <= ny; iy += 1) for (let iz = 0; iz < nz; iz += 1) {
+    const x = min.x + ix * cubeSize, y = min.y + iy * cubeSize, z = min.z + iz * cubeSize
+    pushSegment(x, y, z, x, y, z + cubeSize)
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3))
+  return geometry
+}
+
+function makeBuildPlateGrid(width: number, depth: number, spacing = 10, majorSpacing = 50) {
+  const minorPoints: number[] = []
+  const majorPoints: number[] = []
+  const addLine = (list: number[], x1: number, z1: number, x2: number, z2: number) => list.push(x1, 0, z1, x2, 0, z2)
+  const isMajor = (value: number) => Math.abs(value / majorSpacing - Math.round(value / majorSpacing)) < 1e-6
+  for (let x = -width / 2; x <= width / 2 + 1e-6; x += spacing) addLine(isMajor(x) ? majorPoints : minorPoints, x, -depth / 2, x, depth / 2)
+  for (let z = -depth / 2; z <= depth / 2 + 1e-6; z += spacing) addLine(isMajor(z) ? majorPoints : minorPoints, -width / 2, z, width / 2, z)
+  const makeLines = (points: number[], color: number) => {
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3))
+    return new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false }))
+  }
+  const group = new THREE.Group()
+  group.name = 'rectangular-build-plate-grid'
+  group.add(makeLines(minorPoints, 0xcbd4e0), makeLines(majorPoints, 0x9baabe))
+  return group
+}
+
+type AdaptiveGridData = { positions: Float32Array; cellCount: number; limited: boolean }
+
+type TriangleFeature = { triangle: THREE.Triangle; bounds: THREE.Box3 }
+
+function makeAdaptiveGridData(geometry: THREE.BufferGeometry, bounds: THREE.Box3, transform: THREE.Matrix4, minCellSize: number, maxCellSize: number): AdaptiveGridData {
+  const position = geometry.getAttribute('position')
+  const index = geometry.getIndex()
+  const triangleCount = Math.floor((index?.count ?? position.count) / 3)
+  const sampleStep = Math.max(1, Math.ceil(triangleCount / 50_000))
+  const triangles: TriangleFeature[] = []
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+  for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += sampleStep) {
+    const ia = index ? index.getX(triangleIndex * 3) : triangleIndex * 3
+    const ib = index ? index.getX(triangleIndex * 3 + 1) : triangleIndex * 3 + 1
+    const ic = index ? index.getX(triangleIndex * 3 + 2) : triangleIndex * 3 + 2
+    a.fromBufferAttribute(position, ia).applyMatrix4(transform)
+    b.fromBufferAttribute(position, ib).applyMatrix4(transform)
+    c.fromBufferAttribute(position, ic).applyMatrix4(transform)
+    const triangle = new THREE.Triangle(a.clone(), b.clone(), c.clone())
+    triangles.push({ triangle, bounds: new THREE.Box3().setFromPoints([triangle.a, triangle.b, triangle.c]) })
+  }
+
+  const boxes: THREE.Box3[] = []
+  const fitBoxToMesh = (cell: THREE.Box3, features: TriangleFeature[]) => {
+    const fitted = new THREE.Box3().makeEmpty()
+    for (const feature of features) {
+      const overlap = feature.bounds.clone().intersect(cell)
+      if (!overlap.isEmpty()) fitted.union(overlap)
+    }
+    if (fitted.isEmpty()) return null
+    const cellSize = cell.getSize(new THREE.Vector3())
+    const center = fitted.getCenter(new THREE.Vector3())
+    const min = fitted.min.clone(), max = fitted.max.clone()
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const targetSize = Math.min(minCellSize, cellSize[axis])
+      if (max[axis] - min[axis] < targetSize) {
+        min[axis] = Math.max(cell.min[axis], Math.min(center[axis] - targetSize / 2, cell.max[axis] - targetSize))
+        max[axis] = min[axis] + targetSize
+      }
+    }
+    return new THREE.Box3(min, max)
+  }
+  const maxNodes = MAX_CUBE_GRID_CELLS * 2 - 1
+  const detailThreshold = 12
+  const maxTriangleTests = 3_000_000
+  let visitedNodes = 0
+  let triangleTests = 0
+  let limited = false
+  const subdivide = (cell: THREE.Box3, candidates: TriangleFeature[]) => {
+    visitedNodes += 1
+    if (visitedNodes >= maxNodes || boxes.length >= MAX_CUBE_GRID_CELLS - 8) {
+      limited = true
+      boxes.push(cell)
+      return
+    }
+    const relevant: TriangleFeature[] = []
+    for (const feature of candidates) {
+      triangleTests += 1
+      if (triangleTests > maxTriangleTests) {
+        limited = true
+        boxes.push(cell)
+        return
+      }
+      if (feature.bounds.intersectsBox(cell) && cell.intersectsTriangle(feature.triangle)) relevant.push(feature)
+    }
+    if (relevant.length === 0) return
+    const size = cell.getSize(new THREE.Vector3())
+    const longestEdge = Math.max(size.x, size.y, size.z)
+    if (longestEdge <= minCellSize || (longestEdge <= maxCellSize && relevant.length <= detailThreshold)) {
+      const fitted = fitBoxToMesh(cell, relevant)
+      if (fitted) boxes.push(fitted)
+      return
+    }
+
+    const center = cell.getCenter(new THREE.Vector3())
+    const min = cell.min, max = cell.max
+    const startingBoxCount = boxes.length
+    for (let octant = 0; octant < 8; octant += 1) {
+      if (boxes.length >= MAX_CUBE_GRID_CELLS - 8) {
+        limited = true
+        boxes.splice(startingBoxCount)
+        boxes.push(cell)
+        return
+      }
+      const child = new THREE.Box3(
+        new THREE.Vector3(octant & 1 ? center.x : min.x, octant & 2 ? center.y : min.y, octant & 4 ? center.z : min.z),
+        new THREE.Vector3(octant & 1 ? max.x : center.x, octant & 2 ? max.y : center.y, octant & 4 ? max.z : center.z),
+      )
+      const childCandidates = relevant.filter(feature => feature.bounds.intersectsBox(child))
+      if (childCandidates.length > 0) subdivide(child, childCandidates)
+      if (boxes.length >= MAX_CUBE_GRID_CELLS - 8) {
+        limited = true
+        boxes.splice(startingBoxCount)
+        boxes.push(cell)
+        return
+      }
+    }
+  }
+  const boundsSize = bounds.getSize(new THREE.Vector3())
+  const rootEdge = Math.max(boundsSize.x, boundsSize.y, boundsSize.z)
+  const rootCenter = bounds.getCenter(new THREE.Vector3())
+  const rootBounds = new THREE.Box3(
+    rootCenter.clone().addScalar(-rootEdge / 2),
+    rootCenter.clone().addScalar(rootEdge / 2),
+  )
+  subdivide(rootBounds, triangles.filter(feature => feature.bounds.intersectsBox(rootBounds)))
+
+  const positions: number[] = []
+  const corners = Array.from({ length: 8 }, (_, index) => index)
+  const edgePairs = [[0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3], [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7]]
+  for (const box of boxes) {
+    const points = corners.map(index => new THREE.Vector3(
+      index & 1 ? box.max.x : box.min.x,
+      index & 2 ? box.max.y : box.min.y,
+      index & 4 ? box.max.z : box.min.z,
+    ))
+    for (const [start, end] of edgePairs) positions.push(...points[start].toArray(), ...points[end].toArray())
+  }
+  return { positions: new Float32Array(positions), cellCount: boxes.length, limited }
 }
 
 function makeAxisLabels(length: number) {
@@ -288,7 +550,7 @@ function disposeObjectTree(root: THREE.Object3D) {
 }
 
 function Viewport({
-  model, showGrid, showAxes, showDimensions, rotation, position, scale, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, supportOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
+  model, showGrid, showAxes, showDimensions, rotation, position, scale, showCubeGrid, adaptiveCubeGrid, cubeGridSize, cubeGridBounds, adaptiveGridData, rotateMode, placeOnBedMode, axisTransformMode, analysisOverlay, integrityOverlay, integrityIssue, supportOverlay, layerPreviewOverlay, onRotationChange, onPlaceSurface, onFreeRotateEnd, onAxisTransformStart, onAxisTransform, onAxisTransformEnd, onError, resetRef, viewPresetRef,
 }: {
   model: ModelInfo | null
   showGrid: boolean
@@ -297,8 +559,16 @@ function Viewport({
   rotation: Rotation
   position: AxisValues
   scale: AxisValues
+  showCubeGrid: boolean
+  adaptiveCubeGrid: boolean
+  cubeGridSize: number
+  cubeGridBounds: THREE.Box3 | null
+  adaptiveGridData: AdaptiveGridData | null
   analysisOverlay: THREE.BufferGeometry | null
+  integrityOverlay: THREE.BufferGeometry | null
+  integrityIssue: MeshIntegrityIssue | null
   supportOverlay: THREE.BufferGeometry | null
+  layerPreviewOverlay: LayerPreviewData | null
   rotateMode: boolean
   placeOnBedMode: boolean
   axisTransformMode: AxisTransformMode | null
@@ -323,7 +593,9 @@ function Viewport({
     controls: OrbitControls
     mesh?: THREE.Mesh
     axisGroup?: THREE.Group
-    grid?: THREE.GridHelper
+    cubeGrid?: THREE.LineSegments
+    adaptiveGrid?: THREE.LineSegments
+    grid?: THREE.Group
   } | null>(null)
 
   useEffect(() => {
@@ -356,18 +628,20 @@ function Viewport({
     scene.add(fill)
 
     const bed = new THREE.Mesh(
-      new THREE.BoxGeometry(220, 0.18, 220),
+      new THREE.BoxGeometry(BUILD_VOLUME.width, 0.18, BUILD_VOLUME.depth),
       new THREE.MeshStandardMaterial({ color: '#dfe5ed', roughness: 0.92, metalness: 0.02 }),
     )
     bed.position.y = -0.16
     scene.add(bed)
-    const grid = new THREE.GridHelper(220, 44, 0x9baabe, 0xcbd4e0)
+    const grid = makeBuildPlateGrid(BUILD_VOLUME.width, BUILD_VOLUME.depth)
     grid.position.y = -0.065
     scene.add(grid)
+    const halfWidth = BUILD_VOLUME.width / 2
+    const halfDepth = BUILD_VOLUME.depth / 2
     const bedOutline = new THREE.LineLoop(
       new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-110, -0.06, -110), new THREE.Vector3(110, -0.06, -110),
-        new THREE.Vector3(110, -0.06, 110), new THREE.Vector3(-110, -0.06, 110),
+        new THREE.Vector3(-halfWidth, -0.06, -halfDepth), new THREE.Vector3(halfWidth, -0.06, -halfDepth),
+        new THREE.Vector3(halfWidth, -0.06, halfDepth), new THREE.Vector3(-halfWidth, -0.06, halfDepth),
       ]),
       new THREE.LineBasicMaterial({ color: '#91a1b6' }),
     )
@@ -437,7 +711,7 @@ function Viewport({
 
     const modelBounds = geometry.boundingBox!.clone()
     mesh.position.y = -modelBounds.min.y
-    const extent = Math.max(...model.dimensions, 220)
+    const extent = Math.max(...model.dimensions, BUILD_VOLUME.width, BUILD_VOLUME.depth)
     engine.camera.near = Math.max(extent / 1000, 0.001)
     engine.camera.far = extent * 100
     engine.camera.updateProjectionMatrix()
@@ -483,6 +757,43 @@ function Viewport({
   }, [model, position, rotation, scale])
 
   useEffect(() => {
+    const engine = engineRef.current
+    if (!engine || !model || !cubeGridBounds) return
+    const layout = getCubeGridLayout(cubeGridBounds, cubeGridSize)
+    if (!layout) return
+    const grids: { object: THREE.LineSegments; key: 'cubeGrid' | 'adaptiveGrid' }[] = []
+    const makeLines = (geometry: THREE.BufferGeometry, name: string) => {
+      const object = new THREE.LineSegments(
+        geometry,
+        new THREE.LineBasicMaterial({ color: '#526981', transparent: true, opacity: 0.78, depthTest: true, depthWrite: false }),
+      )
+      object.name = name
+      object.renderOrder = 3
+      engine.scene.add(object)
+      return object
+    }
+    if (showCubeGrid && layout.total <= MAX_CUBE_GRID_CELLS) {
+      const object = makeLines(makeCubeGridGeometry(layout, cubeGridSize), 'bounding-box-cube-grid')
+      engine.cubeGrid = object
+      grids.push({ object, key: 'cubeGrid' })
+    }
+    if (adaptiveCubeGrid && adaptiveGridData) {
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(adaptiveGridData.positions, 3))
+      const object = makeLines(geometry, 'adaptive-feature-grid')
+      engine.adaptiveGrid = object
+      grids.push({ object, key: 'adaptiveGrid' })
+    }
+    return () => {
+      for (const { object, key } of grids) {
+        engine.scene.remove(object)
+        disposeObjectTree(object)
+        if (engine[key] === object) engine[key] = undefined
+      }
+    }
+  }, [model, showCubeGrid, adaptiveCubeGrid, cubeGridSize, cubeGridBounds, adaptiveGridData])
+
+  useEffect(() => {
     const axes = engineRef.current?.axisGroup
     if (axes) axes.visible = showAxes
   }, [model, showAxes])
@@ -521,6 +832,27 @@ function Viewport({
   }, [analysisOverlay, model])
 
   useEffect(() => {
+    const mesh = engineRef.current?.mesh
+    if (!mesh) return
+    const previous = mesh.getObjectByName('mesh-integrity-highlights')
+    if (previous) {
+      mesh.remove(previous)
+      disposeObjectTree(previous)
+    }
+    if (!integrityOverlay || !integrityOverlay.getAttribute('position')?.count || !integrityIssue) return
+    const overlay = new THREE.Mesh(
+      integrityOverlay.clone(),
+      new THREE.MeshBasicMaterial({
+        color: INTEGRITY_ISSUE_COLORS[integrityIssue], side: THREE.DoubleSide, transparent: true, opacity: 0.9,
+        depthTest: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      }),
+    )
+    overlay.name = 'mesh-integrity-highlights'
+    overlay.renderOrder = 4
+    mesh.add(overlay)
+  }, [integrityOverlay, integrityIssue, model])
+
+  useEffect(() => {
     const scene = engineRef.current?.scene
     if (!scene) return
     const previous = scene.getObjectByName('printability-support-columns')
@@ -538,6 +870,28 @@ function Viewport({
       scene.add(supportMesh)
     }
   }, [model, supportOverlay])
+
+  useEffect(() => {
+    const scene = engineRef.current?.scene
+    if (!scene || !layerPreviewOverlay) return
+    const lines: THREE.LineSegments[] = []
+    const addLines = (name: string, positions: ArrayBuffer, color: string) => {
+      const vertices = new Float32Array(positions)
+      if (!vertices.length) return
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
+      const line = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.96 }))
+      line.name = name
+      line.renderOrder = 8
+      scene.add(line)
+      lines.push(line)
+    }
+    addLines('layer-cross-section', layerPreviewOverlay.currentPositions, '#3979b5')
+    addLines('layer-island-warnings', layerPreviewOverlay.islandPositions, '#e6504f')
+    return () => {
+      for (const line of lines) { scene.remove(line); disposeObjectTree(line) }
+    }
+  }, [model, layerPreviewOverlay])
 
   useEffect(() => {
     const engine = engineRef.current
@@ -660,10 +1014,24 @@ function Viewport({
   return <div className={`viewport${showAxes ? ' rotate-axes-active' : ''}${rotateMode ? ' rotate-mode' : ''}${placeOnBedMode ? ' place-on-bed-mode' : ''}`} ref={hostRef} />
 }
 
+function FilamentSpoolIcon({ size = 14 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M4 4h12v2c0 1.1-2.7 2-6 2S4 7.1 4 6V4Z"/>
+    <path d="M4 6v8c0 1.1 2.7 2 6 2s6-.9 6-2V6"/>
+    <path d="M4 10c0 1.1 2.7 2 6 2s6-.9 6-2"/>
+    <path d="M7 4V3h6v1"/>
+  </svg>
+}
+
 function App() {
   const [model, setModel] = useState<ModelInfo | null>(null)
-  const [inspectorTab, setInspectorTab] = useState<'model' | 'starred'>('model')
-  const [suggestedMaterial, setSuggestedMaterial] = useState<'PLA' | 'PETG'>('PLA')
+  const [inspectorTab, setInspectorTab] = useState<'model' | 'starred' | 'filament'>('model')
+  const [suggestedMaterial, setSuggestedMaterial] = useState<FilamentMaterial>('PLA')
+  const [nozzleDiameter, setNozzleDiameter] = useState(0.4)
+  const [profileSettings, setProfileSettings] = useState<Record<FilamentMaterial, ProfileSetting[]>>(() => ({
+    PLA: PROFILE_DEFAULTS.PLA.map(setting => ({ ...setting })),
+    PETG: PROFILE_DEFAULTS.PETG.map(setting => ({ ...setting })),
+  }))
   const [projectName, setProjectName] = useState('Untitled project')
   const [rotation, setRotation] = useState<Rotation>([0, 0, 0])
   const rotationStateRef = useRef<Rotation>(rotation)
@@ -691,15 +1059,86 @@ function App() {
   const [placeOnBedMode, setPlaceOnBedMode] = useState(false)
   const [checkPanelOpen, setCheckPanelOpen] = useState(false)
   const [analysisResult, setAnalysisResult] = useState<OverhangCheck | null>(null)
+  const [integrityResult, setIntegrityResult] = useState<MeshIntegrityResult | null>(null)
+  const [selectedIntegrityIssue, setSelectedIntegrityIssue] = useState<MeshIntegrityIssue | null>(null)
+  const [isCheckingIntegrity, setIsCheckingIntegrity] = useState(false)
+  const [integrityStatus, setIntegrityStatus] = useState('')
   useEffect(() => {
     if (!analysisResult && inspectorTab === 'starred') setInspectorTab('model')
   }, [analysisResult, inspectorTab])
   const [showGrid, setShowGrid] = useState(true)
   const [showDimensions, setShowDimensions] = useState(false)
+  const [advancedToolsEnabled, setAdvancedToolsEnabled] = useState(false)
+  const [showCubeGrid, setShowCubeGrid] = useState(false)
+  const [adaptiveCubeGrid, setAdaptiveCubeGrid] = useState(false)
+  const [cubeGridSize, setCubeGridSize] = useState(30)
+  const [adaptiveMinSize, setAdaptiveMinSize] = useState(5)
+  const cubeGridTransform = useMemo(() => {
+    if (!model) return null
+    const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(rotation[0]),
+      THREE.MathUtils.degToRad(rotation[1]),
+      THREE.MathUtils.degToRad(rotation[2]),
+    ))
+    const scaleVector = new THREE.Vector3(...scale)
+    const rotatedBounds = model.geometry.boundingBox!.clone()
+      .applyMatrix4(new THREE.Matrix4().compose(new THREE.Vector3(), quaternion, scaleVector))
+    return new THREE.Matrix4().compose(
+      new THREE.Vector3(position[0], -rotatedBounds.min.y + position[1], position[2]),
+      quaternion,
+      scaleVector,
+    )
+  }, [model, position, rotation, scale])
+  const cubeGridBounds = useMemo(() => {
+    if (!model || !cubeGridTransform) return null
+    return model.geometry.boundingBox!.clone().applyMatrix4(cubeGridTransform)
+  }, [model, cubeGridTransform])
+  const layerHeight = useMemo(() => {
+    const profileValue = profileSettings[suggestedMaterial].find(setting => setting.label === 'Layer Height')?.value
+    const parsed = Number.parseFloat(profileValue ?? '0.2')
+    return Number.isFinite(parsed) ? THREE.MathUtils.clamp(parsed, 0.05, 2) : 0.2
+  }, [profileSettings, suggestedMaterial])
+  const layerCount = useMemo(() => cubeGridBounds ? Math.max(1, Math.ceil(cubeGridBounds.max.y / layerHeight)) : 1, [cubeGridBounds, layerHeight])
+  useEffect(() => setLayerNumber(current => Math.max(1, Math.min(current, layerCount))), [layerCount])
+  const buildVolumeFit = useMemo(() => {
+    if (!cubeGridBounds) return null
+    const dimensions = cubeGridBounds.getSize(new THREE.Vector3())
+    const halfWidth = BUILD_VOLUME.width / 2, halfDepth = BUILD_VOLUME.depth / 2
+    const overflow = {
+      X: Math.max(0, -halfWidth - cubeGridBounds.min.x, cubeGridBounds.max.x - halfWidth),
+      Y: Math.max(0, -cubeGridBounds.min.y, cubeGridBounds.max.y - BUILD_VOLUME.height),
+      Z: Math.max(0, -halfDepth - cubeGridBounds.min.z, cubeGridBounds.max.z - halfDepth),
+    }
+    return { dimensions, overflow, fits: Object.values(overflow).every(value => value <= 0.05) }
+  }, [cubeGridBounds])
+  const cubeGridLayout = useMemo(
+    () => cubeGridBounds ? getCubeGridLayout(cubeGridBounds, cubeGridSize) : null,
+    [cubeGridBounds, cubeGridSize],
+  )
+  const adaptiveMaxSize = useMemo(() => {
+    if (!cubeGridBounds) return adaptiveMinSize
+    const dimensions = cubeGridBounds.getSize(new THREE.Vector3())
+    return Math.max(adaptiveMinSize, Math.max(dimensions.x, dimensions.y, dimensions.z) / 2)
+  }, [cubeGridBounds, adaptiveMinSize])
+  const adaptiveGridData = useMemo(() => {
+    if (!model || !advancedToolsEnabled || !adaptiveCubeGrid || !cubeGridBounds || !cubeGridTransform) return null
+    return makeAdaptiveGridData(model.geometry, cubeGridBounds, cubeGridTransform, adaptiveMinSize, adaptiveMaxSize)
+  }, [model, advancedToolsEnabled, adaptiveCubeGrid, cubeGridBounds, cubeGridTransform, adaptiveMinSize, adaptiveMaxSize])
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isChecking, setIsChecking] = useState(false)
   const [checkStatus, setCheckStatus] = useState('')
+  const [isFindingOrientations, setIsFindingOrientations] = useState(false)
+  const [orientationStatus, setOrientationStatus] = useState('')
+  const [orientationSuggestions, setOrientationSuggestions] = useState<OrientationSuggestion[] | null>(null)
+  const [layerPreviewEnabled, setLayerPreviewEnabled] = useState(false)
+  const [layerNumber, setLayerNumber] = useState(1)
+  const [layerPreviewData, setLayerPreviewData] = useState<LayerPreviewData | null>(null)
+  const [isSlicingLayer, setIsSlicingLayer] = useState(false)
+  const [layerPreviewStatus, setLayerPreviewStatus] = useState('')
+  const [isScanningLayers, setIsScanningLayers] = useState(false)
+  const [layerScanStatus, setLayerScanStatus] = useState('')
+  const [layerScanData, setLayerScanData] = useState<LayerScanData | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -708,17 +1147,125 @@ function App() {
   const viewPresetControls = useRef<((view: ViewPreset) => void) | null>(null)
   const loadWorkerRef = useRef<Worker | null>(null)
   const checkWorkerRef = useRef<Worker | null>(null)
+  const orientationWorkerRef = useRef<Worker | null>(null)
+  const layerPreviewWorkerRef = useRef<Worker | null>(null)
+  const layerScanWorkerRef = useRef<Worker | null>(null)
+  const integrityWorkerRef = useRef<Worker | null>(null)
+  const cancelIntegrityCheck = useCallback(() => {
+    integrityWorkerRef.current?.terminate()
+    integrityWorkerRef.current = null
+    setIsCheckingIntegrity(false)
+    setIntegrityStatus('')
+  }, [])
   const cancelCheck = useCallback(() => {
     checkWorkerRef.current?.terminate()
     checkWorkerRef.current = null
     setIsChecking(false)
     setCheckStatus('')
   }, [])
+  const cancelOrientationCheck = useCallback(() => {
+    orientationWorkerRef.current?.terminate()
+    orientationWorkerRef.current = null
+    setIsFindingOrientations(false)
+    setOrientationStatus('')
+  }, [])
+  const cancelLayerScan = useCallback(() => {
+    layerScanWorkerRef.current?.terminate()
+    layerScanWorkerRef.current = null
+    setIsScanningLayers(false)
+    setLayerScanStatus('')
+  }, [])
 
   useEffect(() => () => {
     loadWorkerRef.current?.terminate()
     checkWorkerRef.current?.terminate()
+    orientationWorkerRef.current?.terminate()
+    layerPreviewWorkerRef.current?.terminate()
+    layerScanWorkerRef.current?.terminate()
+    integrityWorkerRef.current?.terminate()
   }, [])
+
+  useEffect(() => {
+    cancelOrientationCheck()
+    setOrientationSuggestions(null)
+  }, [model, rotation, position, scale, nozzleDiameter, cancelOrientationCheck])
+
+  useEffect(() => {
+    cancelLayerScan()
+    setLayerScanData(null)
+  }, [model, rotation, position, scale, layerHeight, cancelLayerScan])
+
+  useEffect(() => {
+    if (!layerPreviewEnabled || !model || isScanningLayers) {
+      layerPreviewWorkerRef.current?.terminate()
+      layerPreviewWorkerRef.current = null
+      setLayerPreviewData(null)
+      setIsSlicingLayer(false)
+      setLayerPreviewStatus('')
+      return
+    }
+    let worker: Worker | null = null
+    let canceled = false
+    setLayerPreviewData(null)
+    setIsSlicingLayer(true)
+    setLayerPreviewStatus('Preparing layer slice…')
+    const timer = window.setTimeout(() => {
+      if (canceled) return
+      try {
+        worker = new Worker(new URL('./layer-preview-worker.ts', import.meta.url), { type: 'module' })
+        layerPreviewWorkerRef.current = worker
+        const positionAttribute = model.geometry.getAttribute('position')
+        const positions = (positionAttribute.array as Float32Array).slice()
+        const bounds = model.geometry.boundingBox!
+        const boundsTuple: [number, number, number, number, number, number] = [bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z]
+        worker.onmessage = event => {
+          if (canceled || layerPreviewWorkerRef.current !== worker) return
+          const result = event.data as LayerPreviewWorkerResponse
+          if ('stage' in result) { setLayerPreviewStatus(result.stage); return }
+          layerPreviewWorkerRef.current = null
+          worker?.terminate()
+          if ('error' in result) {
+            setLayerPreviewData(null)
+            setLayerPreviewStatus(result.error)
+            setIsSlicingLayer(false)
+            return
+          }
+          setLayerPreviewData(result)
+          setLayerPreviewStatus('')
+          setIsSlicingLayer(false)
+        }
+        worker.onerror = () => {
+          if (layerPreviewWorkerRef.current !== worker) return
+          layerPreviewWorkerRef.current = null
+          worker?.terminate()
+          setLayerPreviewData(null)
+          setLayerPreviewStatus('Layer preview failed. Try a smaller model.')
+          setIsSlicingLayer(false)
+        }
+        worker.postMessage({
+          positions: positions.buffer,
+          bounds: boundsTuple,
+          rotation,
+          scale,
+          translation: position,
+          layerHeight,
+          layerNumber: Math.min(layerNumber, layerCount),
+        }, [positions.buffer])
+      } catch {
+        if (worker) worker.terminate()
+        if (layerPreviewWorkerRef.current === worker) layerPreviewWorkerRef.current = null
+        setLayerPreviewData(null)
+        setLayerPreviewStatus('Not enough memory to calculate this layer.')
+        setIsSlicingLayer(false)
+      }
+    }, 140)
+    return () => {
+      canceled = true
+      window.clearTimeout(timer)
+      if (worker) worker.terminate()
+      if (layerPreviewWorkerRef.current === worker) layerPreviewWorkerRef.current = null
+    }
+  }, [layerPreviewEnabled, isScanningLayers, layerNumber, layerCount, layerHeight, model, rotation, position, scale])
 
   useEffect(() => {
     if (!model) return
@@ -731,6 +1278,13 @@ function App() {
   const loadFile = useCallback((file?: File) => {
     if (!file) return
     cancelCheck()
+    cancelOrientationCheck()
+    setOrientationSuggestions(null)
+    cancelLayerScan()
+    setLayerScanData(null)
+    cancelIntegrityCheck()
+    setIntegrityResult(null)
+    setSelectedIntegrityIssue(null)
     loadWorkerRef.current?.terminate()
     loadWorkerRef.current = null
     setIsProcessing(false)
@@ -871,7 +1425,7 @@ function App() {
       setIsProcessing(false)
       setError('We could not read this file. Please try another STL.')
     })
-  }, [cancelCheck])
+  }, [cancelCheck, cancelIntegrityCheck, cancelOrientationCheck, cancelLayerScan])
 
   const chooseFile = () => inputRef.current?.click()
   const resetView = () => cameraControls.current?.()
@@ -927,6 +1481,82 @@ function App() {
     setPlaceOnBedMode(false)
     setCheckPanelOpen(false)
   }
+  const runMeshIntegrityCheck = () => {
+    if (!model) return
+    cancelIntegrityCheck()
+    setIntegrityResult(null)
+    setSelectedIntegrityIssue(null)
+    setError('')
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('./mesh-integrity-worker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      setError('This browser could not start the mesh integrity worker.')
+      return
+    }
+    integrityWorkerRef.current = worker
+    setIsCheckingIntegrity(true)
+    setIntegrityStatus('Preparing mesh integrity check…')
+    let positions: Float32Array
+    let indices: Uint32Array | undefined
+    let bounds: [number, number, number, number, number, number]
+    try {
+      const positionAttribute = model.geometry.getAttribute('position')
+      positions = new Float32Array(positionAttribute.array as ArrayLike<number>)
+      const indexAttribute = model.geometry.getIndex()
+      if (indexAttribute) indices = Uint32Array.from(indexAttribute.array)
+      const modelBounds = model.geometry.boundingBox!
+      bounds = [modelBounds.min.x, modelBounds.min.y, modelBounds.min.z, modelBounds.max.x, modelBounds.max.y, modelBounds.max.z]
+    } catch {
+      integrityWorkerRef.current = null
+      worker.terminate()
+      setIsCheckingIntegrity(false)
+      setIntegrityStatus('')
+      setError('Not enough memory to prepare this model for the mesh integrity check.')
+      return
+    }
+    const request: { positions: ArrayBuffer; indices?: ArrayBuffer; bounds: typeof bounds } = {
+      positions: positions.buffer,
+      ...(indices ? { indices: indices.buffer } : {}),
+      bounds,
+    }
+    const transfers: Transferable[] = [request.positions]
+    if (request.indices) transfers.push(request.indices)
+    worker.onmessage = event => {
+      if (integrityWorkerRef.current !== worker) return
+      const result = event.data as MeshIntegrityWorkerResponse
+      if (result.stage) {
+        setIntegrityStatus(result.stage)
+        return
+      }
+      integrityWorkerRef.current = null
+      worker.terminate()
+      setIsCheckingIntegrity(false)
+      setIntegrityStatus('')
+      if (result.error || !result.counts || !result.triangleCounts || !result.highlights) {
+        setError(result.error || 'The mesh integrity check could not process this model.')
+        return
+      }
+      const highlights = {} as Record<MeshIntegrityIssue, THREE.BufferGeometry>
+      for (const issue of ['openEdges', 'nonManifold', 'invertedNormals', 'degenerateFaces'] as const) {
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(result.highlights[issue]), 3))
+        if (geometry.getAttribute('position').count) geometry.computeVertexNormals()
+        highlights[issue] = geometry
+      }
+      setIntegrityResult({ counts: result.counts, triangleCounts: result.triangleCounts, highlights, sampledHighlights: result.sampledHighlights ?? false })
+    }
+    worker.onerror = () => {
+      if (integrityWorkerRef.current !== worker) return
+      integrityWorkerRef.current = null
+      worker.terminate()
+      setIsCheckingIntegrity(false)
+      setIntegrityStatus('')
+      setError('The mesh integrity worker stopped unexpectedly.')
+    }
+    worker.postMessage(request, transfers)
+  }
+
   const runPrintabilityCheck = () => {
     if (!model) return
     cancelCheck()
@@ -985,6 +1615,12 @@ function App() {
         flaggedTriangles: result.flaggedTriangles ?? 0,
         flaggedArea: result.flaggedArea ?? 0,
         thinWallTriangles: result.thinWallTriangles ?? 0,
+        undersizedFeatureTriangles: result.undersizedFeatureTriangles ?? 0,
+        minimumWallThickness: result.minimumWallThickness ?? nozzleDiameter * 2,
+        minimumFeatureWidth: result.minimumFeatureWidth ?? nozzleDiameter,
+        bedContactArea: result.bedContactArea ?? 0,
+        minimumContactArea: result.minimumContactArea ?? (nozzleDiameter * 10) ** 2,
+        floating: result.floating ?? false,
         limitDegrees: result.limitDegrees ?? 45,
         highlights,
         supports,
@@ -999,7 +1635,7 @@ function App() {
       setError('The printability worker stopped unexpectedly. Try checking a smaller or repaired STL.')
     }
     try {
-      worker.postMessage({ positions: positions.buffer, bounds: boundsTuple, rotation, scale, translation: position }, [positions.buffer])
+      worker.postMessage({ positions: positions.buffer, bounds: boundsTuple, rotation, scale, translation: position, nozzleDiameter }, [positions.buffer])
     } catch {
       checkWorkerRef.current = null
       worker.terminate()
@@ -1008,6 +1644,126 @@ function App() {
       setError('Not enough memory to run the printability check on this model.')
     }
   }
+  const findOrientationSuggestions = () => {
+    if (!model) return
+    cancelOrientationCheck()
+    setError('')
+    setOrientationSuggestions(null)
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('./orientation-worker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      setError('This browser could not start the orientation assistant.')
+      return
+    }
+    orientationWorkerRef.current = worker
+    setIsFindingOrientations(true)
+    setOrientationStatus('Preparing geometry…')
+    try {
+      const positionAttribute = model.geometry.getAttribute('position')
+      const positions = (positionAttribute.array as Float32Array).slice()
+      const bounds = model.geometry.boundingBox!
+      const boundsTuple: [number, number, number, number, number, number] = [bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z]
+      worker.onmessage = event => {
+        if (orientationWorkerRef.current !== worker) return
+        const result = event.data as OrientationWorkerResponse
+        if (result.stage) { setOrientationStatus(result.stage); return }
+        orientationWorkerRef.current = null
+        worker.terminate()
+        setIsFindingOrientations(false)
+        setOrientationStatus('')
+        if (result.error || !result.suggestions) {
+          setError(result.error || 'The orientation assistant could not find suggestions.')
+          return
+        }
+        setOrientationSuggestions(result.suggestions)
+      }
+      worker.onerror = () => {
+        if (orientationWorkerRef.current !== worker) return
+        orientationWorkerRef.current = null
+        worker.terminate()
+        setIsFindingOrientations(false)
+        setOrientationStatus('')
+        setError('The orientation assistant stopped unexpectedly. Try a smaller model.')
+      }
+      worker.postMessage({
+        positions: positions.buffer,
+        bounds: boundsTuple,
+        rotation,
+        scale,
+        translation: position,
+        nozzleDiameter,
+        buildVolume: BUILD_VOLUME,
+      }, [positions.buffer])
+    } catch {
+      orientationWorkerRef.current = null
+      worker.terminate()
+      setIsFindingOrientations(false)
+      setOrientationStatus('')
+      setError('Not enough memory to prepare orientation suggestions for this model.')
+    }
+  }
+
+  const runLayerStackScan = () => {
+    if (!model || isScanningLayers) return
+    cancelLayerScan()
+    setLayerScanData(null)
+    setError('')
+    let worker: Worker
+    try {
+      worker = new Worker(new URL('./layer-preview-worker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      setLayerScanStatus('This browser could not start the layer scan worker.')
+      return
+    }
+    layerScanWorkerRef.current = worker
+    setIsScanningLayers(true)
+    setLayerScanStatus('Preparing whole-model scan…')
+    try {
+      const positionAttribute = model.geometry.getAttribute('position')
+      const positions = (positionAttribute.array as Float32Array).slice()
+      const bounds = model.geometry.boundingBox!
+      const boundsTuple: [number, number, number, number, number, number] = [bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z]
+      worker.onmessage = event => {
+        if (layerScanWorkerRef.current !== worker) return
+        const result = event.data as LayerScanWorkerResponse
+        if ('stage' in result) { setLayerScanStatus(result.stage); return }
+        layerScanWorkerRef.current = null
+        worker.terminate()
+        setIsScanningLayers(false)
+        setLayerScanStatus('')
+        if ('error' in result) {
+          setLayerScanStatus(result.error)
+          return
+        }
+        setLayerScanData(result)
+      }
+      worker.onerror = () => {
+        if (layerScanWorkerRef.current !== worker) return
+        layerScanWorkerRef.current = null
+        worker.terminate()
+        setIsScanningLayers(false)
+        setLayerScanStatus('The layer scan stopped unexpectedly. Try a smaller model.')
+      }
+      worker.postMessage({
+        positions: positions.buffer,
+        bounds: boundsTuple,
+        rotation,
+        scale,
+        translation: position,
+        layerHeight,
+        layerNumber: 1,
+        scanAll: true,
+        maxLayers: layerCount,
+      }, [positions.buffer])
+    } catch {
+      layerScanWorkerRef.current = null
+      worker.terminate()
+      setIsScanningLayers(false)
+      setLayerScanStatus('Not enough memory to prepare a full layer scan.')
+    }
+  }
+
   const onRotationChange = useCallback((next: Rotation) => {
     cancelCheck()
     setRotation(next)
@@ -1113,6 +1869,42 @@ function App() {
     setIsDragging(false)
     loadFile(event.dataTransfer.files[0])
   }
+  const profileHasChanges = profileSettings[suggestedMaterial].some((setting, index) => setting.value !== PROFILE_DEFAULTS[suggestedMaterial][index]?.value)
+  const updateProfileSetting = (index: number, value: string) => setProfileSettings(current => ({
+    ...current,
+    [suggestedMaterial]: current[suggestedMaterial].map((setting, settingIndex) => settingIndex === index ? { ...setting, value } : setting),
+  }))
+  const resetProfileDefaults = () => setProfileSettings(current => ({
+    ...current,
+    [suggestedMaterial]: PROFILE_DEFAULTS[suggestedMaterial].map(setting => ({ ...setting })),
+  }))
+  const integrityOverlay = selectedIntegrityIssue && integrityResult ? integrityResult.highlights[selectedIntegrityIssue] : null
+  const hasMeshIntegrityIssues = Boolean(integrityResult && (
+    integrityResult.counts.openEdges || integrityResult.counts.nonManifoldEdges || integrityResult.counts.invertedTriangles || integrityResult.counts.degenerateTriangles
+  ))
+  const hasPrintabilityWarnings = Boolean(analysisResult && (
+    analysisResult.flaggedTriangles || analysisResult.thinWallTriangles || analysisResult.undersizedFeatureTriangles ||
+    analysisResult.floating || analysisResult.bedContactArea < analysisResult.minimumContactArea
+  ))
+  const printabilityVerdict = buildVolumeFit && (!buildVolumeFit.fits || analysisResult?.floating)
+    ? 'Not printable'
+    : analysisResult && integrityResult && !hasMeshIntegrityIssues && !hasPrintabilityWarnings
+      ? 'Ready'
+      : 'Review'
+  const fitOverflowText = buildVolumeFit
+    ? Object.entries(buildVolumeFit.overflow).filter(([, amount]) => amount > 0.05).map(([axis, amount]) => `${axis} +${amount.toFixed(1)} mm`).join(', ')
+    : ''
+  const layerWarningGroups = useMemo(() => {
+    const groups: { startLayer: number; endLayer: number; maxIslands: number }[] = []
+    for (const warning of layerScanData?.scanWarnings ?? []) {
+      const last = groups[groups.length - 1]
+      if (last && warning.layerNumber <= last.endLayer + 1) {
+        last.endLayer = warning.layerNumber
+        last.maxIslands = Math.max(last.maxIslands, warning.islandCount)
+      } else groups.push({ startLayer: warning.layerNumber, endLayer: warning.layerNumber, maxIslands: warning.islandCount })
+    }
+    return groups
+  }, [layerScanData])
 
   return <div className="app-shell" onDragOver={event => { event.preventDefault(); setIsDragging(true) }} onDragLeave={event => { if (event.target === event.currentTarget) setIsDragging(false) }} onDrop={onDrop}>
     <main className="workspace">
@@ -1135,12 +1927,12 @@ function App() {
         </div>
 
         <div className={`canvas-body${(rotateMenuOpen || movePanelOpen || scalePanelOpen || checkPanelOpen) && model ? ' with-rotate-panel' : ''}`}>
-          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} showDimensions={showDimensions} rotation={rotation} position={position} scale={scale} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} supportOverlay={analysisResult?.supports ?? null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
+          <Viewport model={model} showGrid={showGrid} showAxes={rotateMenuOpen || rotateMode || movePanelOpen || scalePanelOpen || axisDragMode !== null} showDimensions={showDimensions} rotation={rotation} position={position} scale={scale} showCubeGrid={advancedToolsEnabled && showCubeGrid} adaptiveCubeGrid={advancedToolsEnabled && adaptiveCubeGrid} cubeGridSize={cubeGridSize} cubeGridBounds={cubeGridBounds} adaptiveGridData={adaptiveGridData} rotateMode={rotateMode} placeOnBedMode={placeOnBedMode} axisTransformMode={axisDragMode ?? (movePanelOpen ? 'move' : scalePanelOpen ? 'scale' : null)} analysisOverlay={analysisResult?.highlights ?? null} integrityOverlay={integrityOverlay} integrityIssue={selectedIntegrityIssue} supportOverlay={analysisResult?.supports ?? null} layerPreviewOverlay={layerPreviewEnabled ? layerPreviewData : null} onRotationChange={onRotationChange} onPlaceSurface={onPlaceSurface} onFreeRotateEnd={onFreeRotateEnd} onAxisTransformStart={onAxisTransformStart} onAxisTransform={onAxisTransform} onAxisTransformEnd={onAxisTransformEnd} onError={setError} resetRef={cameraControls} viewPresetRef={viewPresetControls}/>
           {model && <div className="left-tool-rail">
             <button className={`left-tool-button ${rotateMenuOpen || rotateMode || placeOnBedMode ? 'selected' : ''}`} title="Open rotate tools" aria-label="Open rotate tools" aria-expanded={rotateMenuOpen} onClick={toggleRotatePanel}><Rotate3D size={18}/><span>Rotate</span></button>
             <button className={`left-tool-button ${movePanelOpen || axisDragMode === 'move' ? 'selected' : ''}`} title="Move model" aria-label="Move model" aria-expanded={movePanelOpen} onClick={toggleMovePanel}><Move size={18}/><span>Move</span></button>
             <button className={`left-tool-button ${scalePanelOpen || axisDragMode === 'scale' ? 'selected' : ''}`} title="Scale model" aria-label="Scale model" aria-expanded={scalePanelOpen} onClick={toggleScalePanel}><Maximize size={18}/><span>Scale</span></button>
-            <button className={`left-tool-button ${checkPanelOpen || analysisResult ? 'selected' : ''}`} title="Check printability" aria-label="Check printability" aria-pressed={checkPanelOpen || Boolean(analysisResult)} onClick={toggleCheckPanel}><Scan size={18}/><span>Check</span></button>
+            <button className={`left-tool-button ${checkPanelOpen || analysisResult ? 'selected' : ''}`} title="Check printability" aria-label="Check printability" aria-pressed={checkPanelOpen || Boolean(analysisResult)} onClick={toggleCheckPanel}><ClipboardCheck size={18}/><span>Check</span></button>
             <button className={`left-tool-button ${showDimensions ? 'selected' : ''}`} title="Show measured bounding box" aria-label="Show measured bounding box" aria-pressed={showDimensions} onClick={() => setShowDimensions(value => !value)} disabled={!model}><Ruler size={18}/></button>
           </div>}
           {rotateMenuOpen && model && <div className="rotate-panel" role="dialog" aria-label="Rotate model">
@@ -1168,26 +1960,90 @@ function App() {
             <button className="reset-rotation" onClick={resetModelScale}><RotateCcw size={14}/> Reset scale</button>
           </div>}
           {checkPanelOpen && model && <div className="analysis-panel" role="dialog" aria-label="Printability check">
-            <div className="rotate-menu-header"><div><Scan size={16}/><strong>Printability check</strong></div><button title="Close printability panel" aria-label="Close printability panel" onClick={() => setCheckPanelOpen(false)}><X size={15}/></button></div>
-            <div className="analysis-profile"><span className="analysis-profile-dot"/>FDM profile <span>·</span> current orientation</div>
+            <div className="rotate-menu-header"><div><ClipboardCheck size={16}/><strong>Printability check</strong></div><button title="Close printability panel" aria-label="Close printability panel" onClick={() => setCheckPanelOpen(false)}><X size={15}/></button></div>
+            <div className="analysis-profile"><span className="analysis-profile-dot"/>Ultimaker S5 <span>·</span> {nozzleDiameter.toFixed(2).replace(/0$/, '')} mm nozzle</div>
+            <section className={`unified-printability-summary ${printabilityVerdict.toLowerCase().replace(' ', '-')}`} aria-label="Unified printability summary">
+              <div className="unified-summary-heading"><span>Printability summary</span><strong>{printabilityVerdict}</strong></div>
+              {printabilityVerdict === 'Review' && (!analysisResult || !integrityResult) && <p>Run both checks to complete the verdict.</p>}
+              <div className="unified-summary-row"><span>Build volume</span><strong>{buildVolumeFit?.fits ? 'Fits' : `Exceeds ${fitOverflowText || 'build limits'}`}</strong></div>
+              <div className="unified-summary-row"><span>Bed contact</span><strong>{!analysisResult ? 'Check pending' : analysisResult.floating ? `Floating · ${Math.max(0, cubeGridBounds?.min.y ?? 0).toFixed(2)} mm gap` : analysisResult.bedContactArea < analysisResult.minimumContactArea ? `${analysisResult.bedContactArea.toFixed(1)} mm² · small (<${analysisResult.minimumContactArea.toFixed(1)})` : `${analysisResult.bedContactArea.toFixed(1)} mm²`}</strong></div>
+              <div className="unified-summary-row"><span>Overhangs</span><strong>{analysisResult ? analysisResult.flaggedTriangles ? `${analysisResult.flaggedTriangles.toLocaleString()} faces need review` : 'No unsupported faces' : 'Check pending'}</strong></div>
+              <div className="unified-summary-row"><span>Thin features</span><strong>{!analysisResult ? 'Check pending' : analysisResult.thinWallTriangles || analysisResult.undersizedFeatureTriangles ? `${analysisResult.thinWallTriangles.toLocaleString()} thin walls · ${analysisResult.undersizedFeatureTriangles.toLocaleString()} fine details` : 'No small features detected'}</strong></div>
+              <div className="unified-summary-row"><span>Mesh integrity</span><strong>{integrityResult ? hasMeshIntegrityIssues ? 'Issues found' : 'Pass' : 'Check pending'}</strong></div>
+            </section>
+            <section className="layer-preview-panel" aria-label="Layer-by-layer preview">
+              <label className="layer-preview-toggle"><input type="checkbox" checked={layerPreviewEnabled} onChange={event => { setLayerPreviewEnabled(event.target.checked); setLayerPreviewData(null); setLayerNumber(current => Math.min(current, layerCount)) }}/><span><strong>Layer-by-layer preview</strong><small>Inspect {layerHeight.toFixed(2)} mm layers and unsupported regions.</small></span></label>
+              {layerPreviewEnabled && <>
+                <div className="layer-preview-range-label"><span>Layer {layerNumber} of {layerCount}</span><strong>Z {(layerPreviewData?.layerHeight ?? Math.max(layerHeight / 2, layerNumber * layerHeight - layerHeight / 2)).toFixed(2)} mm</strong></div>
+                <input className="layer-preview-slider" type="range" min={1} max={layerCount} step={1} value={Math.min(layerNumber, layerCount)} aria-label="Preview layer number" onChange={event => setLayerNumber(Number(event.currentTarget.value))}/>
+                <div className="layer-preview-status" aria-live="polite">{isSlicingLayer ? layerPreviewStatus || 'Calculating layer…' : layerPreviewData ? layerNumber === 1 ? (cubeGridBounds && cubeGridBounds.min.y > 0.05 ? 'No first-layer section at the bed; the model is floating above it.' : 'First layer rests directly on the bed.') : layerPreviewData.islandCount ? `${layerPreviewData.islandCount} contour${layerPreviewData.islandCount === 1 ? '' : 's'} have no overlap with the previous layer.` : 'No disconnected unsupported contours detected at this layer.' : layerPreviewStatus}</div>
+                {layerPreviewData && <div className="layer-preview-legend"><span><i/>Cross-section</span><span><i/>New / unsupported</span></div>}
+                {layerPreviewData?.simplified && <div className="analysis-approx-note">Layer analysis simplified from {layerPreviewData.originalTriangleCount.toLocaleString()} to {layerPreviewData.triangleCount.toLocaleString()} triangles; contours and island warnings are approximate.</div>}
+                <div className="layer-scan-actions"><button className="run-analysis-button layer-scan-button" onClick={runLayerStackScan} disabled={isScanningLayers || isChecking || isCheckingIntegrity || isFindingOrientations}><Scan size={14}/>{isScanningLayers ? 'Scanning layer stack…' : `Scan all ${layerCount.toLocaleString()} layers`}</button>{isScanningLayers && <button type="button" className="layer-scan-cancel" onClick={cancelLayerScan}>Cancel</button>}</div>
+                {layerScanData && <div className="layer-scan-results">
+                  <strong>{layerScanData.scanWarnings.length ? `${layerScanData.scanWarnings.length} flagged layer${layerScanData.scanWarnings.length === 1 ? '' : 's'} in ${layerScanData.scannedLayers.toLocaleString()} scanned` : `No unsupported islands found in ${layerScanData.scannedLayers.toLocaleString()} scanned layers`}</strong>
+                  {layerWarningGroups.length > 0 && <>
+                    <div className="layer-scan-timeline" role="group" aria-label="Layer warning timeline"><i/>{layerWarningGroups.map(group => <button type="button" key={`${group.startLayer}-${group.endLayer}`} style={{ left: `${(group.startLayer - 1) / Math.max(1, layerScanData.scannedLayers - 1) * 100}%` }} title={`Jump to layer ${group.startLayer}`} aria-label={`View layer ${group.startLayer} warning`} onClick={() => setLayerNumber(group.startLayer)}/>)}</div>
+                    <div className="layer-scan-warning-list">{layerWarningGroups.map(group => <button type="button" key={`${group.startLayer}-${group.endLayer}`} onClick={() => setLayerNumber(group.startLayer)}><span>{group.startLayer === group.endLayer ? `Layer ${group.startLayer}` : `Layers ${group.startLayer}–${group.endLayer}`}</span><strong>{group.maxIslands} region{group.maxIslands === 1 ? '' : 's'}</strong><small>View</small></button>)}</div>
+                  </>}
+                  {layerScanData.simplified && <div className="analysis-approx-note">Full scan used a simplified mesh ({layerScanData.triangleCount.toLocaleString()} of {layerScanData.originalTriangleCount.toLocaleString()} triangles); warnings are approximate.</div>}
+                </div>}
+                {(isScanningLayers || layerScanStatus) && <div className="layer-scan-progress" role="status">{layerScanStatus}</div>}
+              </>}
+            </section>
+            <section className="orientation-assistant" aria-label="Orientation assistant">
+              <div className="orientation-assistant-heading"><div><Sparkles size={14}/><strong>Orientation assistant</strong></div><span>Preview-only</span></div>
+              <p>Compare a few bed-facing rotations to reduce unsupported surface area while keeping the model inside the build volume.</p>
+              <button className="run-analysis-button orientation-run-button" onClick={findOrientationSuggestions} disabled={isFindingOrientations || isChecking || isCheckingIntegrity}>
+                <Rotate3D size={14}/>{isFindingOrientations ? (orientationStatus || 'Finding orientations…') : 'Find better orientations'}
+              </button>
+              {orientationSuggestions && <div className="orientation-suggestions">
+                {orientationSuggestions.map((suggestion, index) => <article className="orientation-suggestion-card" key={`${suggestion.rotation.join('-')}-${index}`}>
+                  <div className="orientation-suggestion-title"><strong>{index === 0 ? 'Best balance' : `Alternative ${index + 1}`}</strong><span className={suggestion.fits ? 'fits' : 'exceeds'}>{suggestion.fits ? 'Fits build volume' : `Exceeds by ${suggestion.overflow.toFixed(1)} mm`}</span></div>
+                  <div className="orientation-suggestion-metrics"><span>Est. unsupported area <b>{suggestion.unsupportedArea.toFixed(1)} mm² ({suggestion.unsupportedPercent.toFixed(1)}%)</b></span><span>Bed contact <b>{suggestion.bedContactArea.toFixed(1)} mm²{suggestion.bedContactArea < suggestion.minimumContactArea ? ' · small' : ''}</b></span><span>Oriented size <b>{suggestion.dimensions.map(value => `${value.toFixed(1)} mm`).join(' × ')}</b></span></div>
+                  <button type="button" className="orientation-apply-button" onClick={() => { cancelCheck(); setOrientationSuggestions(null); setRotation(suggestion.rotation); setPosition(current => [current[0], 0, current[2]]); setAnalysisResult(null); setRotateMode(false); setPlaceOnBedMode(false); setRotateMenuOpen(false) }}>Apply orientation</button>
+                </article>)}
+                <p className="orientation-disclaimer">These are fast geometry estimates, not slicer support paths. Run the printability and mesh checks again after applying.</p>
+              </div>}
+            </section>
+            <section className="mesh-integrity-block" aria-label="Mesh integrity checks">
+              <div className="mesh-integrity-title">Mesh integrity</div>
+              {!integrityResult && <p className="mesh-integrity-intro">Check for open edges, non-manifold areas, inverted face winding, and degenerate faces.</p>}
+              <button className="run-analysis-button secondary integrity-run-button" onClick={runMeshIntegrityCheck} disabled={isCheckingIntegrity || isChecking}>
+                <ClipboardCheck size={14}/>{isCheckingIntegrity ? (integrityStatus || 'Checking mesh…') : integrityResult ? 'Run integrity check again' : 'Run mesh integrity check'}
+              </button>
+              {integrityResult && <>
+                <div className={`integrity-summary ${integrityResult.counts.openEdges + integrityResult.counts.nonManifoldEdges + integrityResult.counts.invertedTriangles + integrityResult.counts.degenerateTriangles ? 'warning' : 'pass'}`}>
+                  {integrityResult.counts.openEdges + integrityResult.counts.nonManifoldEdges + integrityResult.counts.invertedTriangles + integrityResult.counts.degenerateTriangles ? 'Potential mesh issues found' : 'No mesh integrity issues detected'}
+                </div>
+                <div className="integrity-issue-list">
+                  <button type="button" className={selectedIntegrityIssue === 'openEdges' ? 'selected' : ''} disabled={!integrityResult.counts.openEdges} onClick={() => setSelectedIntegrityIssue(current => current === 'openEdges' ? null : 'openEdges')}><span><i style={{ backgroundColor: INTEGRITY_ISSUE_COLORS.openEdges }}/>Open edges</span><strong>{integrityResult.counts.openEdges.toLocaleString()}</strong><small>{integrityResult.triangleCounts.openEdges.toLocaleString()} adjacent faces</small></button>
+                  <button type="button" className={selectedIntegrityIssue === 'nonManifold' ? 'selected' : ''} disabled={!integrityResult.counts.nonManifoldEdges} onClick={() => setSelectedIntegrityIssue(current => current === 'nonManifold' ? null : 'nonManifold')}><span><i style={{ backgroundColor: INTEGRITY_ISSUE_COLORS.nonManifold }}/>Non-manifold edges</span><strong>{integrityResult.counts.nonManifoldEdges.toLocaleString()}</strong><small>{integrityResult.triangleCounts.nonManifold.toLocaleString()} affected faces</small></button>
+                  <button type="button" className={selectedIntegrityIssue === 'invertedNormals' ? 'selected' : ''} disabled={!integrityResult.counts.invertedTriangles} onClick={() => setSelectedIntegrityIssue(current => current === 'invertedNormals' ? null : 'invertedNormals')}><span><i style={{ backgroundColor: INTEGRITY_ISSUE_COLORS.invertedNormals }}/>Inverted normals / winding</span><strong>{integrityResult.counts.invertedTriangles.toLocaleString()}</strong><small>affected faces</small></button>
+                  <button type="button" className={selectedIntegrityIssue === 'degenerateFaces' ? 'selected' : ''} disabled={!integrityResult.counts.degenerateTriangles} onClick={() => setSelectedIntegrityIssue(current => current === 'degenerateFaces' ? null : 'degenerateFaces')}><span><i style={{ backgroundColor: INTEGRITY_ISSUE_COLORS.degenerateFaces }}/>Degenerate faces</span><strong>{integrityResult.counts.degenerateTriangles.toLocaleString()}</strong><small>affected faces</small></button>
+                </div>
+                {selectedIntegrityIssue && <button className="clear-analysis-button" onClick={() => setSelectedIntegrityIssue(null)}><X size={13}/> Clear mesh highlight</button>}
+                {integrityResult.sampledHighlights && <div className="analysis-approx-note">Highlights are sampled for display; issue counts use the full mesh.</div>}
+              </>}
+            </section>
             {!analysisResult ? <>
               <p className="analysis-intro">Checks surfaces above the bed against the previous 0.2 mm layer. Green shows only the box-minus-model volume that rises from the bed to the model.</p>
-              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={15}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run check'}</button>
+              <button className="run-analysis-button" onClick={runPrintabilityCheck} disabled={isChecking || isCheckingIntegrity}><ClipboardCheck size={15}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run check'}</button>
             </> : <>
               <div className={`analysis-summary ${analysisResult.flaggedTriangles ? 'warning' : 'pass'}`}>
                 <strong>{analysisResult.flaggedTriangles ? 'Potential supports needed' : 'No unsupported surfaces found'}</strong>
                 <span>{analysisResult.flaggedTriangles.toLocaleString()} of {analysisResult.triangleCount.toLocaleString()} analyzed triangles are flagged for support</span>
                 {analysisResult.simplified && <span className="analysis-approx-note">Quick approximate analysis: simplified from {analysisResult.originalTriangleCount?.toLocaleString()} triangles. The displayed model and export are unchanged.</span>}
               </div>
-              {analysisResult.thinWallTriangles > 0 && <div className="thin-wall-warning"><strong>Thin walls detected</strong><span>Some walls are under 2 mm and may be too thin to print reliably.</span></div>}
+              {(analysisResult.thinWallTriangles > 0 || analysisResult.undersizedFeatureTriangles > 0) && <div className="thin-wall-warning"><strong>Thin features detected</strong><span>{analysisResult.thinWallTriangles.toLocaleString()} wall faces below {analysisResult.minimumWallThickness.toFixed(2)} mm; {analysisResult.undersizedFeatureTriangles.toLocaleString()} detail faces below the {analysisResult.minimumFeatureWidth.toFixed(2)} mm nozzle width.</span></div>}
               {analysisResult.flaggedTriangles > 0 && <div className="analysis-legend"><i/> Red: unsupported</div>}
               <div className="analysis-legend"><i className="support-legend-swatch"/> Green: bed-to-model difference (voxelized)</div>
               <p className="analysis-intro">This envelope visualizes the volume difference; it is not print-ready support material.</p>
               <div className="analysis-result-row"><span>Unsupported surface area</span><strong>{analysisResult.flaggedArea.toFixed(1)} mm²</strong></div>
-              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking}><Scan size={14}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run again'}</button>
+              <button className="run-analysis-button secondary" onClick={runPrintabilityCheck} disabled={isChecking || isCheckingIntegrity}><ClipboardCheck size={14}/>{isChecking ? (checkStatus || 'Checking geometry…') : 'Run again'}</button>
             </>}
             <div className="analysis-divider"/>
-            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Thin walls under 2 mm are flagged as a warning. Wall thickness (0.8 mm), details (0.6 × 2 mm), bridges (10 mm), holes (Ø2 mm), clearance (0.5 mm), minimum feature size, and pins (3 mm) still need manual review.</p></div>
+            <div className="analysis-manual"><strong>Other FDM rules</strong><p>Walls below twice the selected nozzle width and opposing details below one nozzle width are flagged as estimates. Bridges (10 mm), holes (Ø2 mm), clearances (0.5 mm), and pins (3 mm) still need manual review.</p></div>
             {analysisResult && <button className="clear-analysis-button" title="Remove check highlights and preview" onClick={() => { cancelCheck(); setAnalysisResult(null) }}><X size={14}/> Clear highlights</button>}
           </div>}
           {isDragging && <div className="drag-overlay"><div className="drag-card"><CloudUpload size={30}/><strong>Drop an STL or 3MF to open</strong><span>Release to start viewing</span></div></div>}
@@ -1207,14 +2063,31 @@ function App() {
       <aside className="inspector">
         <div className="inspector-heading"><div><span className="panel-kicker">WORKSPACE</span><h2>Inspector</h2></div></div>
         <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
-          <button type="button" role="tab" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}>Model</button>
+          <button type="button" role="tab" aria-label="Model" title="Model" aria-selected={inspectorTab === 'model'} className={inspectorTab === 'model' ? 'active' : ''} onClick={() => setInspectorTab('model')}><Box size={14} aria-hidden="true"/></button>
+          <button type="button" role="tab" aria-label="Filament" title="Filament" aria-selected={inspectorTab === 'filament'} className={inspectorTab === 'filament' ? 'active' : ''} onClick={() => setInspectorTab('filament')}><FilamentSpoolIcon/></button>
           {analysisResult && <button type="button" role="tab" aria-selected={inspectorTab === 'starred'} className={inspectorTab === 'starred' ? 'active' : ''} onClick={() => setInspectorTab('starred')}>Suggestions</button>}
         </div>
         <div className="inspector-content" role="tabpanel">
-          {inspectorTab === 'model' || !analysisResult ? <>
+          {inspectorTab === 'filament' ? <div className="filament-tab-content">
+            <div className="filament-tab-title"><FilamentSpoolIcon size={17}/><strong>Printing code suggestions</strong></div>
+            <label className="printer-select-field"><span>3D printer</span><select aria-label="3D printer" defaultValue="ultimaker-s5"><option value="ultimaker-s5">Ultimaker S5</option></select></label>
+            <label className="printer-select-field"><span>Material</span><select aria-label="Material" value={suggestedMaterial} onChange={event => setSuggestedMaterial(event.currentTarget.value as FilamentMaterial)}><option value="PLA">PLA</option><option value="PETG">PETG</option></select></label>
+            <label className="printer-select-field"><span>Nozzle diameter</span><select aria-label="Nozzle diameter" value={nozzleDiameter} onChange={event => { cancelCheck(); setNozzleDiameter(Number(event.currentTarget.value)); setAnalysisResult(null) }}><option value={0.25}>0.25 mm</option><option value={0.4}>0.4 mm</option><option value={0.8}>0.8 mm</option><option value={1}>1.0 mm</option></select></label>
+            <div className="profile-actions"><span>Profile defaults</span><button type="button" onClick={resetProfileDefaults} disabled={!profileHasChanges}>Reset to profile defaults</button></div>
+            <table className="material-settings-table" aria-label={`${suggestedMaterial} settings`}>
+              <caption>{suggestedMaterial} settings</caption>
+              <tbody>{profileSettings[suggestedMaterial].map((setting, index) => {
+                const changed = setting.value !== PROFILE_DEFAULTS[suggestedMaterial][index]?.value
+                return <tr key={setting.label}>
+                  <th scope="row">{setting.label}</th>
+                  <td><div className="profile-value-cell"><input type="text" value={setting.value} aria-label={`${suggestedMaterial} ${setting.label}`} onChange={event => updateProfileSetting(index, event.currentTarget.value)}/>{changed && <span className="profile-modified">Modified</span>}</div></td>
+                </tr>
+              })}</tbody>
+            </table>
+          </div> : inspectorTab === 'model' || !analysisResult ? <>
           <div className="section-label">MODEL</div>
           {model ? <>
-            <div className="model-card"><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)}</span></div><button className="more-button" title="Remove model" aria-label="Remove model" onClick={() => { cancelCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setError('') }}><X size={15}/></button></div>
+            <div className="model-card"><div className="model-card-copy"><strong title={model.name}>{model.name}</strong><span>{formatSize(model.size)}</span></div><button className="more-button" title="Remove model" aria-label="Remove model" onClick={() => { cancelCheck(); cancelIntegrityCheck(); setModel(null); setProjectName('Untitled project'); setRotation([0, 0, 0]); setPosition([0, 0, 0]); setScale([1, 1, 1]); setAxisDragMode(null); setRotateMode(false); setPlaceOnBedMode(false); setMovePanelOpen(false); setScalePanelOpen(false); setCheckPanelOpen(false); setAnalysisResult(null); setIntegrityResult(null); setSelectedIntegrityIssue(null); setError('') }}><X size={15}/></button></div>
             <div className="section-label section-gap">DIMENSIONS <span>mm</span></div>
             <table className="dimensions-table" aria-label="Model dimensions in millimeters"><tbody>
               <tr><th scope="row"><span className="dim-axis axis-red">X</span><span>:</span></th><td>{formatMeasure(model.dimensions[0] * scale[0])}</td></tr>
@@ -1230,6 +2103,32 @@ function App() {
               {model.parameters.length ? <div className="parameter-list">{model.parameters.map((parameter, index) => <div className="parameter-row" key={`${parameter.key}-${index}`} title={`Found in ${parameter.source}`}><span>{parameter.key}</span><strong>{parameter.value}</strong></div>)}</div> : <div className="parameter-empty">This 3MF contains model data, but no readable slicer settings were found. Settings can vary by slicer.</div>}
             </>}
             <div className="health-card"><div className="health-icon"><Check size={14}/></div><div><strong>Mesh loaded</strong><span>Ready to inspect in 3D</span></div><span className="health-dot"/></div>
+            <div className="cube-grid-settings">
+              <label className="advanced-section-toggle">
+                <span className="cube-grid-heading">ADVANCED</span>
+                <span className={`small-toggle${advancedToolsEnabled ? ' is-on' : ''}`}>
+                  <input type="checkbox" role="switch" aria-label="Enable advanced grid options" checked={advancedToolsEnabled} onChange={event => setAdvancedToolsEnabled(event.currentTarget.checked)}/>
+                  <span className="small-toggle-thumb"/>
+                </span>
+              </label>
+              {advancedToolsEnabled && <div className="advanced-grid-options">
+                <label className="cube-grid-toggle"><input type="checkbox" checked={showCubeGrid} onChange={event => setShowCubeGrid(event.currentTarget.checked)}/><span>Bounding-box cubes</span></label>
+                <label className="cube-grid-toggle adaptive-grid-toggle"><input type="checkbox" checked={adaptiveCubeGrid} onChange={event => setAdaptiveCubeGrid(event.currentTarget.checked)}/><span>Adaptive feature boxes</span></label>
+                {(showCubeGrid || adaptiveCubeGrid) && <>
+                  {showCubeGrid && <label className="cube-grid-size-row"><span>Cube edge length</span><input type="number" min="0.1" max="500" step="0.1" value={cubeGridSize} onChange={event => { const value = Number(event.currentTarget.value); if (Number.isFinite(value) && value >= 0.1 && value <= 500) setCubeGridSize(value) }}/><span>mm</span></label>}
+                  {adaptiveCubeGrid && <>
+                    <label className="cube-grid-size-row"><span>Minimum box edge</span><input type="number" min="5" max="500" step="0.1" value={adaptiveMinSize} onChange={event => { const value = Number(event.currentTarget.value); if (Number.isFinite(value) && value >= 5 && value <= 500) setAdaptiveMinSize(value) }}/><span>mm</span></label>
+                    <div className="cube-grid-count">Adaptive range: {adaptiveMinSize.toFixed(1)}–{adaptiveMaxSize.toFixed(1)} mm (max = half the longest side, or minimum for small models)</div>
+                  </>}
+                  {showCubeGrid && cubeGridLayout && <div className="cube-grid-count">Uniform grid: {cubeGridLayout.counts.join(' × ')} · {cubeGridLayout.total.toLocaleString()} cubes</div>}
+                  {showCubeGrid && cubeGridLayout && cubeGridLayout.total > MAX_CUBE_GRID_CELLS && <div className="cube-grid-warning" role="status">Uniform grid is limited to {MAX_CUBE_GRID_CELLS.toLocaleString()} cubes. Increase the cube size.</div>}
+                  {adaptiveCubeGrid && adaptiveGridData && <div className="cube-grid-count">Adaptive grid: {adaptiveGridData.cellCount.toLocaleString()} boxes</div>}
+                  {adaptiveCubeGrid && adaptiveGridData?.limited && <div className="cube-grid-warning" role="status">Detail limit reached; some boxes may exceed the selected size range. Raise the minimum edge to reduce refinement.</div>}
+                  {adaptiveCubeGrid && <div className="cube-grid-hint">Larger boxes in simpler areas; dense mesh regions refine down to the selected minimum edge.</div>}
+                  {showCubeGrid && !adaptiveCubeGrid && <div className="cube-grid-hint">Uniform boxes expand evenly to complete equal-sized cubes.</div>}
+                </>}
+              </div>}
+            </div>
           </> : <>
             <div className="empty-model empty-upload-only"><button className="empty-upload-button" onClick={chooseFile} disabled={isProcessing}><Upload size={15}/> {isProcessing ? 'Processing…' : 'Open file'}</button><span className="empty-format-hint">Supports .STL and .3MF</span></div>
           </>}
