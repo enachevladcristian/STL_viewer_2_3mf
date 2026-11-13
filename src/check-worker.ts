@@ -8,6 +8,7 @@ type CheckRequest = {
   rotation: [number, number, number]
   scale: [number, number, number]
   translation: [number, number, number]
+  nozzleDiameter: number
 }
 type CheckProgress = { stage: string }
 type CheckResponse = {
@@ -18,6 +19,12 @@ type CheckResponse = {
   flaggedTriangles: number
   flaggedArea: number
   thinWallTriangles: number
+  undersizedFeatureTriangles: number
+  minimumWallThickness: number
+  minimumFeatureWidth: number
+  bedContactArea: number
+  minimumContactArea: number
+  floating: boolean
   limitDegrees: number
   highlightPositions: ArrayBuffer
   highlightNormals: ArrayBuffer
@@ -140,7 +147,7 @@ workerScope.onmessage = async event => {
     workerScope.postMessage({ stage: simplified ? `Checking ${(geometry.index!.count / 3).toLocaleString()} simplified triangles and generating preview…` : 'Checking geometry and generating preview…' })
     await yieldToMainThread()
 
-    result = findUnsupportedOverhangs(geometry, request.rotation, 45, request.scale, request.translation, 0.2)
+    result = findUnsupportedOverhangs(geometry, request.rotation, 45, request.scale, request.translation, 0.2, request.nozzleDiameter)
     const highlightPositions = result.highlights.getAttribute('position').array as Float32Array
     const highlightNormals = result.highlights.getAttribute('normal')!.array as Float32Array
     const supportPositions = result.supports.getAttribute('position').array as Float32Array
@@ -153,6 +160,12 @@ workerScope.onmessage = async event => {
       flaggedTriangles: result.flaggedTriangles,
       flaggedArea: result.flaggedArea,
       thinWallTriangles: result.thinWallTriangles,
+      undersizedFeatureTriangles: result.undersizedFeatureTriangles,
+      minimumWallThickness: result.minimumWallThickness,
+      minimumFeatureWidth: result.minimumFeatureWidth,
+      bedContactArea: result.bedContactArea,
+      minimumContactArea: result.minimumContactArea,
+      floating: result.floating,
       limitDegrees: result.limitDegrees,
       highlightPositions: highlightPositions.buffer,
       highlightNormals: highlightNormals.buffer,

@@ -6,6 +6,12 @@ export type OverhangCheck = {
   flaggedTriangles: number
   flaggedArea: number
   thinWallTriangles: number
+  undersizedFeatureTriangles: number
+  minimumWallThickness: number
+  minimumFeatureWidth: number
+  bedContactArea: number
+  minimumContactArea: number
+  floating: boolean
   limitDegrees: number
   supports: THREE.BufferGeometry
   originalTriangleCount?: number
@@ -233,8 +239,6 @@ function hasPreviousLayerSupport(data: TriangleData, x: number, y: number, z: nu
   return offsets.some(([dx, dz]) => isInsideAt(data, x + dx, targetY, z + dz))
 }
 
-const MIN_WALL_THICKNESS_MM = 2
-
 function getNormalBin(nx: number, ny: number, nz: number) {
   const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz)
   if (ax >= ay && ax >= az) return nx >= 0 ? 1 : 0
@@ -242,13 +246,13 @@ function getNormalBin(nx: number, ny: number, nz: number) {
   return nz >= 0 ? 5 : 4
 }
 
-/** Finds close, opposing surface facets that indicate a thin wall. */
-function countThinWallTriangles(data: TriangleData, threshold = MIN_WALL_THICKNESS_MM) {
+/** Estimates thin walls/features from nearby opposing facets using spatial bins. */
+function countThinWallTriangles(data: TriangleData, wallThreshold: number, featureThreshold: number) {
   const triangleCount = Math.floor(data.positions.length / 9)
   const centers = new Float32Array(triangleCount * 3)
   const normals = new Float32Array(triangleCount * 3)
   const bins = new Map<string, number[]>()
-  const cellSize = threshold
+  const cellSize = wallThreshold
 
   for (let triangle = 0; triangle < triangleCount; triangle += 1) {
     const offset = triangle * 9
@@ -273,8 +277,9 @@ function countThinWallTriangles(data: TriangleData, threshold = MIN_WALL_THICKNE
     else bins.set(key, [triangle])
   }
 
-  const flagged = new Uint8Array(triangleCount)
-  let flaggedCount = 0
+  const flaggedWalls = new Uint8Array(triangleCount)
+  const flaggedFeatures = new Uint8Array(triangleCount)
+  let wallCount = 0, featureCount = 0
   for (let triangle = 0; triangle < triangleCount; triangle += 1) {
     const offset = triangle * 3
     const nx = normals[offset], ny = normals[offset + 1], nz = normals[offset + 2]
@@ -297,11 +302,13 @@ function countThinWallTriangles(data: TriangleData, threshold = MIN_WALL_THICKNE
             const vy = centers[candidateOffset + 1] - y
             const vz = centers[candidateOffset + 2] - z
             const thickness = Math.abs(vx * nx + vy * ny + vz * nz)
-            if (thickness < 0.05 || thickness >= threshold) continue
+            if (thickness < 0.05 || thickness >= wallThreshold) continue
             const tangentSq = vx * vx + vy * vy + vz * vz - thickness * thickness
             if (tangentSq > 0.75 * 0.75) continue
-            if (!flagged[triangle]) { flagged[triangle] = 1; flaggedCount += 1 }
-            if (!flagged[candidate]) { flagged[candidate] = 1; flaggedCount += 1 }
+            for (const face of [triangle, candidate]) {
+              if (!flaggedWalls[face]) { flaggedWalls[face] = 1; wallCount += 1 }
+              if (thickness < featureThreshold && !flaggedFeatures[face]) { flaggedFeatures[face] = 1; featureCount += 1 }
+            }
             foundOpposingSurface = true
             break
           }
@@ -309,7 +316,26 @@ function countThinWallTriangles(data: TriangleData, threshold = MIN_WALL_THICKNE
       }
     }
   }
-  return flaggedCount
+  return { thinWallTriangles: wallCount, undersizedFeatureTriangles: featureCount }
+}
+
+function measureBedContact(data: TriangleData, nozzleDiameter: number) {
+  const tolerance = 0.05
+  let projectedArea = 0
+  const triangleCount = Math.floor(data.positions.length / 9)
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const offset = triangle * 9
+    const ax = data.positions[offset], ay = data.positions[offset + 1], az = data.positions[offset + 2]
+    const bx = data.positions[offset + 3], by = data.positions[offset + 4], bz = data.positions[offset + 5]
+    const cx = data.positions[offset + 6], cy = data.positions[offset + 7], cz = data.positions[offset + 8]
+    if (Math.max(ay, by, cy) - data.minY > tolerance) continue
+    projectedArea += Math.abs((bx - ax) * (cz - az) - (bz - az) * (cx - ax)) * 0.5
+  }
+  return {
+    bedContactArea: projectedArea,
+    minimumContactArea: (nozzleDiameter * 10) ** 2,
+    floating: data.minY > tolerance,
+  }
 }
 
 /** Marks unsupported surfaces and reports opposing facets that form thin walls. */
@@ -320,6 +346,7 @@ export function findUnsupportedOverhangs(
   scaleFactors: [number, number, number] = [1, 1, 1],
   translation: [number, number, number] = [0, 0, 0],
   layerHeight = DEFAULT_LAYER_HEIGHT,
+  nozzleDiameter = 0.4,
 ): OverhangCheck {
   const position = geometry.getAttribute('position')
   const index = geometry.getIndex()
@@ -386,6 +413,13 @@ export function findUnsupportedOverhangs(
   highlights.computeVertexNormals()
 
   const supports = buildBoundingBoxDifference(data)
-  const thinWallTriangles = countThinWallTriangles(data)
-  return { highlights, triangleCount, flaggedTriangles, flaggedArea, thinWallTriangles, limitDegrees, supports }
+  const nozzle = THREE.MathUtils.clamp(nozzleDiameter, 0.1, 1.2)
+  const minimumWallThickness = nozzle * 2
+  const minimumFeatureWidth = nozzle
+  const thinFeatures = countThinWallTriangles(data, minimumWallThickness, minimumFeatureWidth)
+  const bedContact = measureBedContact(data, nozzle)
+  return {
+    highlights, triangleCount, flaggedTriangles, flaggedArea, ...thinFeatures, minimumWallThickness, minimumFeatureWidth,
+    ...bedContact, limitDegrees, supports,
+  }
 }
